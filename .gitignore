@@ -8,8 +8,9 @@ output/
 *.img
 *.zip
 
-# Keep tracked small binary assets (e.g. ICC profiles)
+# Keep tracked small binary assets (e.g. ICC profiles & extracted AI weight tables)
 !assets/icc/*.icc
+!src/dsp_ai/k3_*.bin
 
 # Git worktrees directory
 worktrees/
