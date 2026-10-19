@@ -1,0 +1,39 @@
+{
+  "feature": "CEVA-CV AI DSP Awakening & Deep Learning AF",
+  "worktree": "worktrees/feat-dsp-ai-af",
+  "branch": "feat/dsp-ai-af",
+  "official_fw_sha256": "a2f664dfca034059eb0fd6e18ab08684c326b4a034d85c164dad7e1ec9b5655f",
+  "sd_card_package": {
+    "DF_EX.BIN": {
+      "path": "d:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\sd_card\\DF_EX.BIN",
+      "size": 4112408,
+      "sha256": "276d6a8196c61563307ddbf01fd568408b594f6733c3ccb43bd0a83d5ac98d84",
+      "target_va": "0x51200000",
+      "payload_size": 4112384
+    },
+    "DF_ID_S.BIN": {
+      "path": "d:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\sd_card\\DF_ID_S.BIN",
+      "size": 65536,
+      "sha256": "3d3ebf29622323bb4a203347feaf676aeac110a7b1181604270a1ae0c22b0a2a",
+      "target_va": "0x515ec000"
+    },
+    "DF_IP.BIN": {
+      "path": "d:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\sd_card\\DF_IP.BIN",
+      "size": 16384,
+      "sha256": "cf409a84f3f2d8fac1491634ecda882c9d76b3439c2423da1b31950463a52067",
+      "target_va": "0x515fc000"
+    }
+  },
+  "dsp_runtime_specs": {
+    "ceva_dsp_window_va": "0x41000000",
+    "df_ex_load_va": "0x51200000",
+    "df_id_s_load_va": "0x515ec000",
+    "df_ip_load_va": "0x515fc000",
+    "supported_test_vectors": [
+      "DSP_test 0 (CEVA Version)",
+      "DSP_test 1 (RGB2YUV Vector Pipe)",
+      "DSP_test 2 (2D Spatial Filter)",
+      "DSP_test 3 (Custom Neural Net Kernel)"
+    ]
+  }
+}
