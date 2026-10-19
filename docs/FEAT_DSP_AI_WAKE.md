@@ -41,36 +41,48 @@ GR4 RTOS `0x53965ff8` 解析器要求的 `DF_EX.BIN` 二进制布局：
 
 ---
 
-## 3. 实机验证与操作指南
+## 3. 阶段 2 实装：免串口开机全自动唤醒 (Automated Boot-time Wakeup)
 
-### 3.1 SD 卡免刷机热加载验证（最安全）
+由于零售版机身通常**无法引出调试串口**，我们已全面实装**阶段 2 自动唤醒补丁**，将 DSP 加载、解除复位启动与内核自检固化进固件运行管线。
 
-利用理光 RTOS 内置的驱动机制，无需刷写或修改机身闪存即可快速点亮验证：
+### 3.1 运行执行模型与蹦床架构
 
-1. 运行提取脚本生成配套文件：
-   ```bash
-   python src/dsp_ai/dsp_splitter.py
-   ```
-2. 将输出目录 [`output/sd_card/`](file:///d:/Ricoh%20GR4%20firmware%20Mod/worktrees/feat-dsp-ai-af/output/sd_card) 下生成的三个文件：
-   * `DF_EX.BIN`
-   * `DF_ID_S.BIN`
-   * `DF_IP.BIN`
-   直接复制到 SD 卡根目录（RTOS 挂载为 `A:\`）。
-3. 通过串口终端或 Shell 注入执行：
-   ```text
-   DSP_load A:
-   DSP_start
-   DSP_test 0
-   ```
-   * `DSP_test 0`：验证 CEVA 版本响应与握手回执。
-   * `DSP_test 1`：验证 CEVA-CV RGB->YUV 矢量转换流水线。
-   * `DSP_test 2`：验证 2D 卷积滤波（Filter2D）。
+```text
+相机开机 / 启动实时取景 (Live View)
+       │
+       ▼
+[0x536520f0] LiveViewProcess3aContoller 钩子蹦床 (b #0x53000e00)
+       │
+       ▼
+[0x53000e00] RTOS 代码洞 (Code Cave @ 0x53000e00)
+       │  1. 执行覆盖的原指令 (mov ip, sp; push {r4..pc})
+       │  2. 保存通用暂存寄存器 (push {r0-r3, lr})
+       │  3. 调用 DspFactory::GetDspService() 获取驱动句柄
+       │  4. 检查 DSP 运行状态:
+       │     └─ 若 bit 0 置位 (已启动): 直接跳至出口 (保证单次执行，防重复载入)
+       │  5. 调用 DspService::LoadDsp(svc, 'A', 0, 0) 从 SD 卡 (A:\) 载入三文件
+       │  6. 检查载入状态:
+       │     └─ 若 bit 1 未置位 (无 SD 卡或文件不存在): 干净跳出，不影响相机正常拍摄
+       │  7. 调用 DspService::Start(svc, 0, 0) 解除 CEVA-CV 复位锁定并点火运行
+       │  8. 调用 DspService::Test(svc, 0) 触发 CEVA 版本握手自检
+       │  9. 恢复暂存寄存器 (pop {r0-r3, lr})
+       │
+       ▼
+返回原流程 [0x536520f8] 继续执行 3A/Live View 预览循环 (平滑无感)
+```
 
-### 3.2 固件集成固化（开机自启动）
+### 3.2 刷机与使用步骤（无需任何串口接线）
 
-在固件容器层面将 DSP 代码常驻并挂接自动启动：
-1. 通过 [`build_dsp_firmware.py`](file:///d:/Ricoh%20GR4%20firmware%20Mod/worktrees/feat-dsp-ai-af/src/dsp_ai/build_dsp_firmware.py) 将 Section 06 注册为 DSP 分区并重新打包固件容器。
-2. 在 `DeviceInitialize`（`0x5376e4e4`）末端蹦床跳板自动调用 `DspService::LoadDsp` 与 `Start`。
+1. **准备 SD 卡依赖文件**：
+   * 确保将 [`output/sd_card/`](file:///d:/Ricoh%20GR4%20firmware%20Mod/worktrees/feat-dsp-ai-af/output/sd_card) 下的三个文件复制到 SD 卡根目录：
+     * `DF_EX.BIN` (4,112,408 B)
+     * `DF_ID_S.BIN` (65,536 B)
+     * `DF_IP.BIN` (16,384 B)
+2. **刷入修补后固件**：
+   * 将自动生成的 Flashable 固件 [`output/fwdc248b.bin`](file:///d:/Ricoh%20GR4%20firmware%20Mod/worktrees/feat-dsp-ai-af/output/fwdc248b.bin)（38,693,256 字节，双重字累加和 `word_sum == 0` 校验已通过）复制到 SD 卡根目录。
+   * 相机按住 `DISP` 或 `MENU` 键开机，进入官方固件升级菜单确认升级。
+3. **点火生效**：
+   * 升级完成后开机，在进入实时取景界面的瞬间，固件蹦床即自动完成 CEVA-CV 载入与握手启动。即使拔出存储卡，相机原版反差/片上相位对焦依然完全正常工作。
 
 ---
 

@@ -1,9 +1,12 @@
 {
-  "feature": "CEVA-CV AI DSP Awakening & Deep Learning AF",
-  "worktree": "worktrees/feat-dsp-ai-af",
-  "branch": "feat/dsp-ai-af",
+  "release_type": "Stage 2 Automated Boot-Time CEVA-CV DSP Awakening",
   "official_fw_sha256": "a2f664dfca034059eb0fd6e18ab08684c326b4a034d85c164dad7e1ec9b5655f",
-  "sd_card_package": {
+  "flashable_firmware": {
+    "path": "d:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\fwdc248b.bin",
+    "size": 38693256,
+    "sha256": "dc20d73b193a4a626e45601bd953105dab9d52db14f7984bddce21d85f4096d8"
+  },
+  "sd_card_dependencies": {
     "DF_EX.BIN": {
       "path": "d:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\sd_card\\DF_EX.BIN",
       "size": 4112408,
@@ -24,16 +27,12 @@
       "target_va": "0x515fc000"
     }
   },
-  "dsp_runtime_specs": {
-    "ceva_dsp_window_va": "0x41000000",
-    "df_ex_load_va": "0x51200000",
-    "df_id_s_load_va": "0x515ec000",
-    "df_ip_load_va": "0x515fc000",
-    "supported_test_vectors": [
-      "DSP_test 0 (CEVA Version)",
-      "DSP_test 1 (RGB2YUV Vector Pipe)",
-      "DSP_test 2 (2D Spatial Filter)",
-      "DSP_test 3 (Custom Neural Net Kernel)"
-    ]
-  }
+  "patch_details": {
+    "hook_va": "0x536520f0",
+    "cave_va": "0x53000e00",
+    "return_va": "0x536520f8",
+    "cave_size_bytes": 108,
+    "trampoline_bytes": "42bbe6ea0000a0e1"
+  },
+  "execution_model": "Camera boots -> LiveView starts -> Trampoline branches to 0x53000e00 -> Loads DF_EX/ID_S/IP from SD card (A:\\) -> Unresets and starts CEVA-CV DSP -> Runs CEVA Version test -> Returns to LiveView sequence cleanly."
 }
