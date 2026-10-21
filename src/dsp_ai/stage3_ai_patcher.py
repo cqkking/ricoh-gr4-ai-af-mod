@@ -6,28 +6,26 @@ Dual-Hook Architecture:
 1. Hook 1 (Stage 2 Boot Awakening @ LiveViewProcess3aContoller 0x536520f0 -> Cave 1 @ 0x53000d60):
    - Reconstructs APCS frame prologue.
    - Queries DspFactory::GetDspService().
-   - If not yet started, invokes DspService::LoadDsp('A'), Start(), and Test().
-   - Loads Pentax K-3 III neural DSP binary from SD card into CEVA-CV vector DSP.
-   - Runs safely ONCE during boot initialization outside of any per-frame lock.
-   - Tested and verified 100% stable on real hardware.
+   - Invokes DspService::LoadDsp(m_dspService, 'C', 0, 0) from SD card root (Drive C:).
+   - Starts and self-tests CEVA-CV vector DSP.
 
 2. Hook 2 (Stage 3 Continuous LiveView AI AF @ FaceDetectionService::Task 0x5386ea8c -> Cave 2 @ 0x53000e00):
    - Hooked directly into Ricoh GR IV's continuous 30/60 fps Face Detection task loop.
-   - Checks if CEVA-CV DSP is active; if not running, falls back cleanly to stock detection.
-   - Decimation: Runs AI inference once every 2 Live View frames (~30 fps).
-   - Retrieves active LiveView frame from CaptureControlService [0x55395a18, #8] -> [this, #4].
+   - Dual-Guarantee DSP Check: If DSP not yet started, executes on-demand wakeup from SD card Drive C:.
+   - Direct Frame Extraction: Pulls physical preview YUV frame from FdLibraryService -> p_FdEngine -> [p_FdEngine, #0xc].
+   - Pitch dynamically retrieved from [p_FdEngine, #0x10] (default 960).
    - Downsamples Live View preview frame to 56x56 RGB @ 0x51600000.
    - Dispatches msg_id 4 to CEVA-CV DSP via DspService::SendMessage (0x539663c0).
-   - Waits on DspService::WaitMessage (0x539666dc, timeout 50 ms) for tensor completion.
+   - Waits on DspService::WaitMessage (0x539666dc, timeout 100 ms) for tensor completion.
    - Scans 64x64 output heatmap @ 0x51610000 for peak confidence score.
-   - High Confidence (>= 60):
+   - High Confidence (>= 25, ~10% probability threshold for side profile & backlit detection):
      - Translates peak coordinates (col, row) to Live View pixel coordinates (X, Y, W=180, H=180).
      - Formats face bounding box & eye landmarks into m_DetectedFaceResult [r4, #0x78].
      - Sets detected face count = 1 in FdLibraryService [r4, #0x38].
      - ZERO calls to 0x538e32c4 (CreateTask)!
      - Resumes at 0x5386ea9c, unlocking the mutex and triggering UpdateFaceDetectionResult
        to natively render the green AI face/eye box on LCD and drive the 165-point AF sensor!
-   - Low Confidence (< 60) or Fallback:
+   - Low Confidence (< 25) or Fallback:
      - Seamlessly falls back to stock FotoNation LibAHFD face detector (0x5383ec84).
      - Resumes at 0x5386ea94.
 
@@ -45,7 +43,7 @@ GR4_BASE           = 0x53000000
 
 # Cave & Memory Layout
 CAVE1_VA           = 0x53000d60 # Boot-time DSP awakening cave (152 B, ends @ 0x53000df8)
-CAVE2_VA           = 0x53000e00 # Continuous LiveView AI AF cave (688 B, ends @ 0x530010b0)
+CAVE2_VA           = 0x53000e00 # Continuous LiveView AI AF cave (756 B, ends @ 0x530010f4)
 CAVE_VA            = CAVE2_VA   # Backward compatibility alias
 DESC_TABLE_VA      = 0x53001200 # 728 B table placed after code cave (ends @ 0x530014d8)
 STATUS_VA          = 0x51602540 # Telemetry & status variables in DSP shared DRAM (AP=011 R/W)
@@ -59,7 +57,7 @@ TENSOR_OUT_VA      = 0x51610000 # 64x64 heatmap output buffer
 
 # Firmware Services & Entry Points
 GET_DSP_SVC_VA     = 0x539658c4 # DspFactory::GetDspService()
-LOAD_DSP_VA        = 0x53966d74 # DspService::LoadDsp(svc, 'A', 0, 0)
+LOAD_DSP_VA        = 0x53966d74 # DspService::LoadDsp(svc, 'C', 0, 0)
 START_DSP_VA       = 0x53966214 # DspService::Start(svc, 0, 0)
 TEST_DSP_VA        = 0x53966f18 # DspService::Test(svc, 0)
 SEND_MSG_VA        = 0x539663c0 # DspService::SendMessage(svc, &seq, 4, timeout, &msg)
@@ -69,7 +67,6 @@ UPDATE_FACE_RES_VA = 0x5386e0e4 # FaceDetectionService::UpdateFaceDetectionResul
 
 # Service Pointers
 TRACK_OBJ_PTR_VA   = 0x550b6aa4 # [0x550b6aa4] -> LiveViewProcessTrackObject instance
-LV_IMAGE_SVC_VA    = 0x55395a18 # [0x55395a18 + 8] -> m_CaptureViewControlService
 
 # Hook Sites
 HOOK1_SITE_VA      = 0x536520f0 # LiveViewProcess3aContoller entry (Boot Awakening)
@@ -92,15 +89,15 @@ def encode_arm_branch(from_va: int, to_va: int, is_bl: bool = False, cond: int =
     op = (cond << 28) | (0x0b000000 if is_bl else 0x0a000000)
     return op | disp_words
 
-def encode_movw(rd: int, imm16: int) -> int:
+def encode_movw(rd: int, imm16: int, cond: int = 0xe) -> int:
     imm4 = (imm16 >> 12) & 0xf
     imm12 = imm16 & 0xfff
-    return 0xe3000000 | (imm4 << 16) | (rd << 12) | imm12
+    return (cond << 28) | 0x03000000 | (imm4 << 16) | (rd << 12) | imm12
 
-def encode_movt(rd: int, imm16: int) -> int:
+def encode_movt(rd: int, imm16: int, cond: int = 0xe) -> int:
     imm4 = (imm16 >> 12) & 0xf
     imm12 = imm16 & 0xfff
-    return 0xe3400000 | (imm4 << 16) | (rd << 12) | imm12
+    return (cond << 28) | 0x03400000 | (imm4 << 16) | (rd << 12) | imm12
 
 def emit_ldr_imm32(insns: list, rd: int, val: int):
     insns.append(encode_movw(rd, val & 0xffff))
@@ -123,7 +120,6 @@ def build_cave1_payload(cave_va: int = CAVE1_VA, resume_va: int = HOOK1_RESUME_V
         insns.append(0)
 
     # 1. Complete standard APCS frame construction for LiveViewProcess3aContoller
-    #    (replaces 0x536520f0..0x53652104 before any subroutine call can corrupt ip)
     insns.append(0xe1a0c00d) # mov  ip, sp
     insns.append(0xe92dd8f0) # push {r4, r5, r6, r7, fp, ip, lr, pc} (32 bytes)
     insns.append(0xe24cb004) # sub  fp, ip, #4 (fp is safely established)
@@ -148,9 +144,9 @@ def build_cave1_payload(cave_va: int = CAVE1_VA, resume_va: int = HOOK1_RESUME_V
     insns.append(0xe3120001) # tst  r2, #1 (STARTED)
     branch_to("exit", is_bl=False, cond=0x1) # bne .exit
 
-    # 6. Call DspService::LoadDsp(m_dspService, 'A', 0, 0)
+    # 6. Call DspService::LoadDsp(m_dspService, 'C', 0, 0) from SD card root!
     insns.append(0xe1a00004) # mov  r0, r4
-    insns.append(0xe3a01041) # mov  r1, #0x41 ('A')
+    insns.append(0xe3a01043) # mov  r1, #0x43 ('C' -> Drive C:\ on Ricoh GR4)
     insns.append(0xe3a02000) # mov  r2, #0
     insns.append(0xe3a03000) # mov  r3, #0
     curr_pc = cave_va + len(insns) * 4
@@ -241,36 +237,61 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     branch_to("fallback_stock", is_bl=False, cond=0x0) # beq .fallback_stock
 
     # 4. Check if DSP is already running (status bit 0)
-    #    Notice: Cave 1 awakes the DSP at boot; if not started yet, Cave 2 safely falls back
     insns.append(0xe5952004) # ldr  r2, [r5, #4]
     insns.append(0xe3120001) # tst  r2, #1 (STARTED)
+    branch_to("dsp_is_running", is_bl=False, cond=0x1) # bne .dsp_is_running
+
+    # --- Dual-Guarantee: Wake up DSP from SD Card Drive C: if Cave 1 ran too early ---
+    insns.append(0xe1a00005) # mov  r0, r5
+    insns.append(0xe3a01043) # mov  r1, #0x43 ('C' -> Drive C:\ on SD Card)
+    insns.append(0xe3a02000) # mov  r2, #0
+    insns.append(0xe3a03000) # mov  r3, #0
+    curr_pc = cave_va + len(insns) * 4
+    insns.append(encode_arm_branch(curr_pc, LOAD_DSP_VA, is_bl=True))
+
+    insns.append(0xe5952004) # ldr  r2, [r5, #4]
+    insns.append(0xe3120002) # tst  r2, #2 (LOADED)
     branch_to("fallback_stock", is_bl=False, cond=0x0) # beq .fallback_stock
 
-    # 5. Frame decimation: increment counter @ STATUS_VA + 4 (0x51602544)
-    emit_ldr_imm32(insns, 3, STATUS_VA + 4)
-    insns.append(0xe5931000) # ldr  r1, [r3]
-    insns.append(0xe2811001) # add  r1, r1, #1
+    insns.append(0xe1a00005) # mov  r0, r5
+    insns.append(0xe3a01000) # mov  r1, #0
+    insns.append(0xe3a02000) # mov  r2, #0
+    curr_pc = cave_va + len(insns) * 4
+    insns.append(encode_arm_branch(curr_pc, START_DSP_VA, is_bl=True))
+
+    insns.append(0xe1a00005) # mov  r0, r5
+    insns.append(0xe3a01000) # mov  r1, #0
+    curr_pc = cave_va + len(insns) * 4
+    insns.append(encode_arm_branch(curr_pc, TEST_DSP_VA, is_bl=True))
+
+    emit_ldr_imm32(insns, 3, STATUS_VA)
+    emit_ldr_imm32(insns, 1, 0x41564543) # 'CEVA'
     insns.append(0xe5831000) # str  r1, [r3]
-    insns.append(0xe3110001) # tst  r1, #1 (every 2nd frame = ~30 fps inference)
-    branch_to("fallback_stock", is_bl=False, cond=0x1) # bne .fallback_stock
+    branch_to("fallback_stock", is_bl=False, cond=0xe) # let frame 0 warm up, start inference on frame 1!
 
-    # 6. Get LiveView Buffer: [0x55395a18, #8] -> m_CaptureViewControlService
-    emit_ldr_imm32(insns, 3, LV_IMAGE_SVC_VA)
-    insns.append(0xe5933008) # ldr  r3, [r3, #8] (m_CaptureViewControlService)
+    mark_label("dsp_is_running")
+
+    # 5. Direct Preview Frame Buffer Extraction from FdLibraryService -> p_FdEngine
+    # r4 is FaceDetectionService*
+    insns.append(0xe5940038) # ldr  r0, [r4, #0x38] (FdLibraryService)
+    insns.append(0xe3500000) # cmp  r0, #0
+    branch_to("fallback_stock", is_bl=False, cond=0x0)
+    insns.append(0xe5903044) # ldr  r3, [r0, #0x44] (p_FdEngine)
     insns.append(0xe3530000) # cmp  r3, #0
-    branch_to("fallback_stock", is_bl=False, cond=0x0) # beq .fallback_stock
+    branch_to("fallback_stock", is_bl=False, cond=0x0)
+    insns.append(0xe593000c) # ldr  r0, [r3, #0xc]  (p_yuv_image preview buffer!)
+    insns.append(0xe3500000) # cmp  r0, #0
+    branch_to("fallback_stock", is_bl=False, cond=0x0)
+    insns.append(0xe593c010) # ldr  ip, [r3, #0x10] (pitch / width)
+    insns.append(0xe35c0000) # cmp  ip, #0
+    insns.append(encode_movw(12, 960, cond=0x0)) # moveq ip, #960
 
-    # [m_CaptureViewControlService, #4] -> p_liveview_yuv (960x640 preview image)
-    insns.append(0xe5933004) # ldr  r3, [r3, #4] (active preview frame buffer)
-    insns.append(0xe3530000) # cmp  r3, #0
-    branch_to("fallback_stock", is_bl=False, cond=0x0) # beq .fallback_stock
-
-    # 7. Downsample Live View frame into 56x56 RGB @ 0x51600000
-    insns.append(0xe1a00003) # mov  r0, r3 (src_buf)
+    # 6. Downsample Live View frame into 56x56 RGB @ 0x51600000
+    # r0 = src_buf, r1 = dst_buf, ip = pitch
     emit_ldr_imm32(insns, 1, TENSOR_IN_VA) # r1 = 0x51600000
     branch_to("sub_downsample", is_bl=True, cond=0xe)
 
-    # 8. Prepare 9-word message @ 0x51602500
+    # 7. Prepare 9-word message @ 0x51602500
     emit_ldr_imm32(insns, 7, TENSOR_MSG_VA) # r7 = 0x51602500
     emit_ldr_imm32(insns, 0, DESC_TABLE_VA) # msg[0] = 0x53001200
     insns.append(0xe5870000) # str  r0, [r7, #0]
@@ -291,36 +312,36 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     emit_ldr_imm32(insns, 0, TENSOR_OUT_VA) # msg[8] = 0x51610000
     insns.append(0xe5870020) # str  r0, [r7, #32]
 
-    # 9. Setup seq pointer @ STATUS_VA + 8 (0x51602548)
+    # 8. Setup seq pointer @ STATUS_VA + 8 (0x51602548)
     emit_ldr_imm32(insns, 6, STATUS_VA + 8)
     insns.append(0xe3a00000) # mov  r0, #0
     insns.append(0xe1c600b0) # strh r0, [r6]
 
-    # 10. Call DspService::SendMessage(m_dspService, &seq, msg_id=4, timeout=50, &msg)
+    # 9. Call DspService::SendMessage(m_dspService, &seq, msg_id=4, timeout=100, &msg)
     insns.append(0xe1a00005) # mov  r0, r5 (svc)
     insns.append(0xe1a01006) # mov  r1, r6 (&seq)
     insns.append(0xe3a02004) # mov  r2, #4 (msg_id = 4)
-    insns.append(0xe3a03032) # mov  r3, #50 (timeout = 50 ms)
+    insns.append(0xe3a03064) # mov  r3, #100 (timeout = 100 ms)
     insns.append(0xe58d7000) # str  r7, [sp] (&msg)
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, SEND_MSG_VA, is_bl=True))
 
-    # 11. Call DspService::WaitMessage(m_dspService, seq, timeout=50, &resp)
+    # 10. Call DspService::WaitMessage(m_dspService, seq, timeout=100, &resp)
     insns.append(0xe1a00005) # mov  r0, r5 (svc)
     insns.append(0xe1d610b0) # ldrh r1, [r6] (seq)
-    insns.append(0xe3a02032) # mov  r2, #50 (timeout = 50 ms)
+    insns.append(0xe3a02064) # mov  r2, #100 (timeout = 100 ms)
     insns.append(0xe1a03007) # mov  r3, r7 (&resp)
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, WAIT_MSG_VA, is_bl=True))
     insns.append(0xe3500000) # cmp  r0, #0
     branch_to("fallback_stock", is_bl=False, cond=0x1) # bne .fallback_stock
 
-    # 12. Scan 64x64 output heatmap @ 0x51610000 for peak score
+    # 11. Scan 64x64 output heatmap @ 0x51610000 for peak score
     emit_ldr_imm32(insns, 0, TENSOR_OUT_VA)
     branch_to("sub_find_peak", is_bl=True, cond=0xe) # returns r0: score, r1: col, r2: row
 
-    # 13. Check confidence threshold (>= 60)
-    insns.append(0xe350003c) # cmp  r0, #60
+    # 12. Check confidence threshold (>= 25: robust detection of side profiles, masks, and shadows)
+    insns.append(0xe3500019) # cmp  r0, #25 (approx 10% probability threshold)
     branch_to("fallback_stock", is_bl=False, cond=0xb) # blt .fallback_stock
 
     # --- K-3 III Deep Learning Subject Detected! ---
@@ -407,7 +428,7 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(encode_arm_branch(curr_pc, HOOK2_FALLBACK_VA, is_bl=False))
 
     # --- Subroutine: Downsample Live View Frame to 56x56 RGB ---
-    # r0 = src_yuv, r1 = dst_rgb (9408 bytes)
+    # r0 = src_yuv, r1 = dst_rgb (9408 bytes), ip = pitch (e.g. 960)
     mark_label("sub_downsample")
     insns.append(0xe92d4070) # push {r4, r5, r6, lr}
     insns.append(0xe3a02000) # mov  r2, #0 (row = 0)
@@ -415,16 +436,15 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     mark_label("loop_ds_row")
     insns.append(0xe3a03000) # mov  r3, #0 (col = 0)
     mark_label("loop_ds_col")
-    # Fetch pixel: simple integer subsample (stride ~17 for col, ~11 for row)
+    # Fetch pixel: integer subsample
     insns.append(0xe3a05011) # mov  r5, #17
     insns.append(0xe0050593) # mul  r5, r3, r5 (src_x = col * 17)
     insns.append(0xe3a0600b) # mov  r6, #11
     insns.append(0xe0060692) # mul  r6, r2, r6 (src_y = row * 11)
-    insns.append(encode_movw(12, 960))       # movw ip, #960 (LiveView pitch)
-    insns.append(0xe006069c) # mul  r6, ip, r6 (src_y * 960)
-    insns.append(0xe0855006) # add  r5, r5, r6 (src_offset = src_y*960 + src_x)
+    insns.append(0xe006069c) # mul  r6, ip, r6 (src_y * pitch)
+    insns.append(0xe0855006) # add  r5, r5, r6 (src_offset = src_y*pitch + src_x)
     insns.append(0xe7d06005) # ldrb r6, [r0, r5] (Y value)
-    # Store R=Y, G=Y, B=Y (grayscale approximation, zero loss of shape for CNN)
+    # Store R=Y, G=Y, B=Y
     insns.append(0xe7c16004) # strb r6, [r1, r4] (R)
     insns.append(0xe2844001) # add  r4, r4, #1
     insns.append(0xe7c16004) # strb r6, [r1, r4] (G)
@@ -571,13 +591,13 @@ def apply_stage3_patch(rtos_binary: bytearray, rtos_payload_offset: int = 0) -> 
                 "fallback_resume_vaddr": hex(HOOK2_FALLBACK_VA),
             }
         },
-        "code_cave": { # Backward compatibility
+        "code_cave": {
             "vaddr": hex(CAVE2_VA),
             "offset": hex(cave2_off),
             "length": len(cave2_payload),
             "hex": cave2_payload.hex(),
         },
-        "trampoline": { # Backward compatibility
+        "trampoline": {
             "vaddr": hex(HOOK2_SITE_VA),
             "offset": hex(tramp2_off),
             "original_hex": orig_hook2_bytes.hex(),

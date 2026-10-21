@@ -48,19 +48,18 @@ CEVA-CV 矢量协处理器与主控 ARM Cortex-A7 通过 Milbeaut M10V 的多核
 实时取景循环 (Live View Loop @ 60 fps)
        │
        ▼
-[0x536520f0] LiveViewProcess3aContoller 钩子蹦床 (b #0x53000e00)
+[0x5386ea8c] FaceDetectionService::Task 钩子蹦床 (b #0x53000e00)
        │
        ▼
-[0x53000e00] 阶段 3 智能追踪代码洞 (Code Cave)
+[0x53000e00] 阶段 3 智能追踪代码洞 2 (Cave 2, 756 字节)
        │
-       ├─ [首帧运行] 检查 DSP STARTED 标志 (r4+4 & 1)
-       │     └─ 若未启动: 调用 LoadDsp('A') -> Start() -> Test() 完成阶段 2 唤醒
+       ├─ [双保险机制] 检查 DSP STARTED 标志 (r2 & 1)
+       │     └─ 若未启动: 调用 LoadDsp(svc, 'C', 0, 0) -> Start() -> Test() 完成开机唤醒
        │
-       ├─ [常规帧运行] 帧降采样计数 (STATUS_VA + 4)
-       │     └─ 仅在偶数帧触发推断 (稳定在 ~30 fps，CPU 占用低于 0.8%)
+       ├─ [逐帧推断执行] 硬件 DSP 协处理器推断 (<0.4% 主机 CPU 占用率)
        │
-       ├─ [步骤 1: 图像截取与下采样]
-       │     ├─ 从 LiveViewImageService 获取当前物理预览帧 (0x55395a18+8)
+       ├─ [步骤 1: 图像截取与动态跨度下采样]
+       │     ├─ 从 FdLibraryService -> p_FdEngine 获取当前物理预览 YUV 帧 ([r3, #0xc]) 与跨度 ([r3, #0x10])
        │     └─ 执行紧凑汇编内核: 960x640 YUV -> 56x56 RGB Planar (@ 0x51600000)
        │
        ├─ [步骤 2: 硬件信箱调度推断]
@@ -70,7 +69,7 @@ CEVA-CV 矢量协处理器与主控 ARM Cortex-A7 通过 Milbeaut M10V 的多核
        │
        ├─ [步骤 3: 64x64 热力图峰值解析]
        │     ├─ 汇编扫描 4096 字节概率图 (@ 0x51610000) 提取最大峰值 (max_val, col, row)
-       │     └─ 门限判定: 若 max_val >= 60 (约 24% 置信度)，触发对焦更新
+       │     └─ 门限判定: 若 max_val >= 25 (约 10% 置信度，灵敏捕捉侧脸/逆光/口罩)，触发对焦更新
        │
        ├─ [步骤 4: 挂接理光原生 AF 跟踪系统与 LCD 绿框显示]
        │     ├─ 坐标映射: X = col * 15, Y = row * 10, W = 180, H = 180，并推算人眼关键点

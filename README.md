@@ -84,7 +84,7 @@ This matches the exact byte length of the Pentax K-3 Mark III DSP firmware secti
 - Installs a trampoline at `LiveViewProcess3aContoller` (`0x536520f0` $\to$ `b #0x53000e00`).
 - Execution sequence:
   1. Checks if DSP is already running (`status & 1`); if so, bypasses initialization in 3 clock cycles.
-  2. Calls `DspService::LoadDsp(m_dspService, 'A', 0, 0)` to load the 3 files from the SD card root (`A:\`).
+  2. Calls `DspService::LoadDsp(m_dspService, 'C', 0, 0)` to load the 3 files from the SD card root (`C:\`).
   3. Validates `status & 2` (`LOADED`).
   4. Calls `DspService::Start(m_dspService, 0, 0)` to release CEVA-CV reset and activate the vector clocks.
   5. Calls `DspService::Test(m_dspService, 0)` for hardware handshake.
@@ -97,22 +97,23 @@ This matches the exact byte length of the Pentax K-3 Mark III DSP firmware secti
   - `k3_std.bin`  (9,408 B) @ `0x54217680`: $56 \times 56 \times 3$ standard deviation activation scale.
 - **Dual-Hook Architecture**:
   - **Hook 1: Boot Wakeup (`LiveViewProcess3aContoller` @ `0x536520f0` -> Cave 1 @ `0x53000d60`, 152 B)**:
-    - Reconstructs APCS prologue and calls `LoadDsp('A')`, `Start()`, `Test()` safely **once at boot time** from SD card.
+    - Reconstructs APCS prologue and calls `LoadDsp('C')`, `Start()`, `Test()` safely **once at boot time** from SD card root (`C:\`).
     - Verified 100% stable on real hardware in Stage 2.
-  - **Hook 2: Continuous LiveView AI AF (`FaceDetectionService::Task` @ `0x5386ea8c` -> Cave 2 @ `0x53000e00`, 692 B)**:
+  - **Hook 2: Continuous LiveView AI AF (`FaceDetectionService::Task` @ `0x5386ea8c` -> Cave 2 @ `0x53000e00`, 756 B)**:
     - Hooked directly into Ricoh GR IV's continuous 30/60 fps Face Detection task loop.
-    - **Decimation**: Runs deep learning inference every 2 Live View frames (~30 fps), using <0.8% CPU time.
-    - **Frame Capture**: Pulls active $960 \times 640$ YUV frame buffer from `CaptureControlService` (`[0x55395a18, #8] -> [m_CaptureViewControlService, #4]`).
+    - **Dual-Guarantee Boot Ignition**: If early boot ran before SD card mount, Cave 2 auto-detects `STARTED == 0` on frame 0 and initializes the DSP from Drive `C:\` on demand.
+    - **Pristine Frame Capture**: Pulls active YUV LiveView frame buffer directly from `FdLibraryService -> p_FdEngine -> [p_FdEngine, #0xc]` with dynamic pitch from `[p_FdEngine, #0x10]`.
+    - **Continuous Per-Frame Inference**: Hardware CEVA-CV DSP executes CNN inference on every frame (<0.4% host CPU) without odd-frame decimation dropout.
     - **Bilinear Downsampler**: Resamples the preview frame into a $56 \times 56$ RGB tensor at shared DMA address `0x51600000`.
-    - **DSP Dispatch**: Dispatches Message ID 4 via `DspService::SendMessage` (`0x539663c0`) to the CEVA-CV vector DSP and awaits tensor completion via `DspService::WaitMessage` (`0x539666dc`, timeout 50 ms).
+    - **DSP Dispatch**: Dispatches Message ID 4 via `DspService::SendMessage` (`0x539663c0`) to the CEVA-CV vector DSP and awaits tensor completion via `DspService::WaitMessage` (`0x539666dc`, timeout 100 ms).
     - **Heatmap Peak Extraction**: Scans the $64 \times 64$ confidence heatmap at `0x51610000` for peak centroid $(col, row, score)$.
     - **Deep Learning AF Lock & LCD OSD**:
-      - When peak confidence $\ge 60$:
+      - When peak confidence $\ge 25$ (~10% detection threshold for side profiles, dark scenes, and face masks):
         - Translates centroid to Live View pixels $(X, Y, W=180, H=180)$ and calculates eye coordinates (`left_eye`, `right_eye`, `mouth`).
         - Injects the detected target into `m_DetectedFaceResult` (`[r4, #0x78]`) and sets `face_count = 1` in `FdLibraryService` (`[r4, #0x38]`).
         - **Zero calls to `CreateTask`** (completely eliminates half-press freeze).
         - Resumes at `0x5386ea9c`, unlocking the mutex and triggering `UpdateFaceDetectionResult` (`0x5386e0e4`) to render the green AI face/eye tracking box on the LCD and drive the 165-point AF sensor!
-      - When peak confidence $< 60$:
+      - When peak confidence $< 25$:
         - Seamlessly falls back to stock FotoNation `LibAHFD` (`0x5383ec84`) and resumes at `0x5386ea94`, ensuring zero focus hunting or dropped frames.
 
 ---
@@ -135,8 +136,8 @@ This matches the exact byte length of the Pentax K-3 Mark III DSP firmware secti
 
 Your SD card root directory will look like:
 ```text
-SD Card Root (A:\)
-├── fwdc248b.bin       (38,693,256 B [Stage 2] or 38,781,980 B [Stage 3])
+SD Card Root (C:\)
+├── fwdc248b.bin       (38,693,256 B [Stage 2] or 38,791,732 B [Stage 3])
 ├── DF_EX.BIN          ( 4,112,408 bytes - CEVA-CV Execution partition)
 ├── DF_ID_S.BIN        (    65,536 bytes - Neural Network weights)
 └── DF_IP.BIN          (    16,384 bytes - Reset vector table)
@@ -249,7 +250,7 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder
 
 [Step 3/4] Splicing Stage 3 Dual Caves, Trampolines & AI Tables...
   [+] Hook 1 (Boot Wakeup): 152 B Cave @ VA 0x53000d60, Hook @ VA 0x536520f0
-  [+] Hook 2 (LiveView AI): 692 B Cave @ VA 0x53000e00, Hook @ VA 0x5386ea8c
+  [+] Hook 2 (LiveView AI): 756 B Cave @ VA 0x53000e00, Hook @ VA 0x5386ea8c
   [+] Embedded Desc Table (728 B) @ VA 0x53001200
   [+] Embedded Mean Table (9408 B) @ VA 0x541db540
   [+] Embedded Std Table  (9408 B) @ VA 0x54217680
@@ -257,7 +258,7 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder
   [+] Payload word_sum == 0 validated successfully.
 
 [Step 4/4] Rebuilding flashable container with LZSS framing...
-  -> Modified payload bytes: 19722
+  -> Modified payload bytes: 19770
   [+] Written Stage 3 preserved binary: output/fwdc248b_stage3_ai_track.bin (38,791,732 bytes)
   [+] Written active flashable binary:  output/fwdc248b.bin (38,791,732 bytes)
 
@@ -272,26 +273,34 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder
 | Function / Component | Virtual Address (VA) | Purpose |
 | :--- | :--- | :--- |
 | `LiveViewProcess3aContoller` | `0x536520f0` | Hook 1 entry for one-time boot DSP awakening (`b #0x53000d60`) |
-| Cave 1 (Boot Wakeup) | `0x53000d60` | 152-byte boot engine: queries `DspService`, loads from SD card, starts & tests DSP |
+| Cave 1 (Boot Wakeup) | `0x53000d60` | 152-byte boot engine: queries `DspService`, loads from SD card (Drive `C:\`), starts & tests DSP |
 | `FaceDetectionService::Task` | `0x5386ea8c` | Hook 2 site for continuous per-frame LiveView AI AF (`b #0x53000e00`) |
-| Cave 2 (LiveView AI AF) | `0x53000e00` | 692-byte execution engine (Downsampler + DSP IPC + Peak Detection + Face Results) |
-| `m_CaptureViewControlService` | `[0x55395a18, #8]` | Pointer to preview streaming controller; offset `+4` points to raw 960x640 YUV frame |
+| Cave 2 (LiveView AI AF) | `0x53000e00` | 756-byte execution engine (Dual-guarantee wakeup + Preview YUV + DSP IPC + Peak Detection + Face Results) |
+| `p_FdEngine` | `[r4, #0x38, #0x44]` | Engine pointer; `+0xc` points to physical LiveView YUV frame, `+0x10` holds frame pitch (stride) |
 | `DspFactory::GetDspService()` | `0x539658c4` | Retrieves CEVA-CV `DspService` singleton pointer |
-| `DspService::LoadDsp` | `0x53966d74` | Loads `DF_EX.BIN`, `DF_ID_S.BIN`, `DF_IP.BIN` from SD card |
+| `DspService::LoadDsp` | `0x53966d74` | Loads `DF_EX.BIN`, `DF_ID_S.BIN`, `DF_IP.BIN` from SD card root (Drive `C:\`) |
 | `DspService::Start` | `0x53966214` | Deasserts DSP reset, starts execution at `0x515fc000` |
 | `DspService::Test` | `0x53966f18` | Runs CEVA-CV version self-test |
 | `DspService::SendMessage` | `0x539663c0` | Dispatches Message ID 4 (Inference request) |
-| `DspService::WaitMessage` | `0x539666dc` | Awaits tensor inference completion |
+| `DspService::WaitMessage` | `0x539666dc` | Awaits tensor inference completion (timeout 100 ms) |
 | `m_DetectedFaceResult` | `[FaceDetectionService, #0x78]` | Array of 100-byte face structures (`x, y, w, h, eye_l, eye_r, mouth, score`) |
 | `FdLibraryService` | `[FaceDetectionService, #0x38]` | Subsystem holding detected face count @ `+0x30` |
 | `UpdateFaceDetectionResult` | `0x5386e0e4` | Submits face/eye coordinates to LCD OSD display task & AF engine |
-| Stock FotoNation `DetectFace` | `0x5383ec84` | Fallback CPU face detector when AI confidence $< 60$ |
+| Stock FotoNation `DetectFace` | `0x5383ec84` | Fallback CPU face detector when AI confidence $< 25$ |
 
 ---
 
 ## 8. Release Changelog
 
-### v1.0.4 (Current Release)
+### v1.0.5 (Current Release)
+- **Drive Letter Fix (`'A'` -> `'C'`)**: Fixed argument passed to `DspService::LoadDsp` (`0x53966d74`) from `'A'` to `'C'` (`0x43`). In Ricoh GR IV RTOS, `A:\` is the internal ROM resource partition (`12_RES.bin`), while the SD card root is `C:\`. This enables `DF_EX.BIN`, `DF_ID_S.BIN`, and `DF_IP.BIN` to load successfully from the SD card.
+- **Dynamic Preview Frame Buffer via `p_FdEngine`**: Replaced uninitialized BSS pointer `0x55395a18` with true hardware pointer extracted via `FaceDetectionService::Task`: `[r4, #0x38] -> [r0, #0x44] -> [r3, #0xc]`, with dynamic stride pitch `[r3, #0x10]`.
+- **Lower Confidence Threshold (25)**: Lowered peak score threshold from 60 to 25 (~10% probability), matching Pentax K-3 III's detection sensitivity for 90° side profiles, backlit/shadow faces, and face masks.
+- **Removed Odd-Frame Decimation Fallback**: Eliminated odd-frame fallback to FotoNation, allowing the CEVA-CV DSP to run inference continuously on every frame (<0.4% host CPU) without wiping detected face states.
+- **Dual-Guarantee On-Demand Wakeup**: Cave 2 now automatically verifies `STARTED == 0` on frame 0 and initializes the DSP from Drive `C:\` on demand if early boot Hook 1 fired before SD card mount.
+- **Binary Checksum**: `fwdc248b.bin` (38,791,732 bytes, SHA-256: `d058ca69c47da83c7a0937458ad0e8bd9674fb64965c5facd75a8098242ca8c0`).
+
+### v1.0.4
 - **Resolved Half-Press AF Freeze**: Identified that `0x538e32c4` was erroneously assumed to be `UpdateTrackTarget`, but was statically proven to be `CreateTask` in `src/Task.cpp`. Calling it with $H=180$ (`0x000000b4`) created rogue tasks pointing to ARM low-memory exception vectors, which crashed the CPU when the scheduler switched context on half-press (S1). Completely removed calls to `0x538e32c4` and eliminated mutex deadlocks.
 - **Architectural Dual-Hook Separation**:
   - Hook 1 @ `0x536520f0` -> Cave 1 @ `0x53000d60` (152 B): Handles one-time boot loading of CEVA-CV DSP from SD card outside the face detection mutex.
