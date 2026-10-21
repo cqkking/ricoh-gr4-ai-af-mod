@@ -26,10 +26,10 @@ from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM
 
 GR4_BASE          = 0x53000000
 CAVE_VA           = 0x53000e00
-DESC_TABLE_VA     = 0x53001100 # 728 B table placed after code cave
-STATUS_VA         = 0x53001400 # Telemetry & status variables placed after desc table
-MEAN_TABLE_VA     = 0x541db540 # 9,408 B table in zero cave
-STD_TABLE_VA      = 0x54217680 # 9,408 B table in zero cave
+DESC_TABLE_VA     = 0x53001100 # 728 B table placed after code cave (Read-Only constants)
+STATUS_VA         = 0x51602540 # Telemetry & status variables in DSP shared DRAM (AP=011 R/W)
+MEAN_TABLE_VA     = 0x541db540 # 9,408 B table in zero cave (Read-Only constants)
+STD_TABLE_VA      = 0x54217680 # 9,408 B table in zero cave (Read-Only constants)
 
 TENSOR_IN_VA      = 0x51600000 # 56x56 RGB input buffer in DSP shared RAM
 TENSOR_MSG_VA     = 0x51602500 # 36-byte message buffer
@@ -44,7 +44,6 @@ WAIT_MSG_VA       = 0x539666dc # DspService::WaitMessage(svc, seq, timeout, &res
 UPDATE_TRACK_VA   = 0x538e32c4 # UpdateTrackTarget(TrackObj*, X, Y, W, H, Conf)
 
 TRACK_OBJ_PTR_VA  = 0x550b6aa4 # [0x550b6aa4] -> LiveViewProcessTrackObject instance
-TRACK_SLOT0_VA    = 0x53fe1a94 # Primary AF tracking slot
 LV_IMAGE_SVC_VA   = 0x55395a18 # [0x55395a18 + 8] -> p_liveview_buf
 
 HOOK_SITE_VA      = 0x536520f0 # LiveViewProcess3aContoller entry
@@ -209,6 +208,8 @@ def build_stage3_cave_payload(cave_va: int = CAVE_VA, resume_va: int = RESUME_SI
     insns.append(0xe1a03005) # mov  r3, r5 (&resp)
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, WAIT_MSG_VA, is_bl=True))
+    insns.append(0xe3500000) # cmp  r0, #0
+    branch_to("exit", is_bl=False, cond=0x1) # bne .exit (exit cleanly on error or timeout)
 
     # Scan 64x64 output heatmap @ 0x51610000 for peak score
     emit_ldr_imm32(insns, 0, TENSOR_OUT_VA)
@@ -229,21 +230,13 @@ def build_stage3_cave_payload(cave_va: int = CAVE_VA, resume_va: int = RESUME_SI
     insns.append(0xe3a050c8) # mov  r5, #200 (W)
     insns.append(0xe3a070c8) # mov  r7, #200 (H)
 
-    # Save telemetry @ STATUS_VA + 12 (0x53000fbc)
+    # Save telemetry @ STATUS_VA + 12 (0x5160254c)
     emit_ldr_imm32(insns, 3, STATUS_VA + 12)
     insns.append(0xe5830000) # str  r0, [r3, #0]  (peak_score)
     insns.append(0xe5838004) # str  r8, [r3, #4]  (last_x)
     insns.append(0xe5836008) # str  r6, [r3, #8]  (last_y)
     insns.append(0xe583500c) # str  r5, [r3, #12] (last_w)
     insns.append(0xe5837010) # str  r7, [r3, #16] (last_h)
-
-    # Inject target into primary tracking slot @ TRACK_SLOT0_VA (0x53fe1a94)
-    emit_ldr_imm32(insns, 3, TRACK_SLOT0_VA)
-    insns.append(0xe5838000) # str  r8, [r3, #0] (X)
-    insns.append(0xe5c36004) # strb r6, [r3, #4] (Y)
-    insns.append(0xe1c350b6) # strh r5, [r3, #6] (W)
-    insns.append(0xe5c37008) # strb r7, [r3, #8] (H)
-    insns.append(0xe583000c) # str  r0, [r3, #12] (Conf)
 
     # Fetch LiveViewProcessTrackObject instance from [0x550b6aa4]
     emit_ldr_imm32(insns, 3, TRACK_OBJ_PTR_VA)
@@ -421,7 +414,6 @@ def apply_stage3_patch(rtos_binary: bytearray, rtos_payload_offset: int = 0) -> 
             "heatmap_output_64x64": hex(TENSOR_OUT_VA),
         },
         "af_tracking_bridge": {
-            "primary_slot0_vaddr": hex(TRACK_SLOT0_VA),
             "update_target_vaddr": hex(UPDATE_TRACK_VA),
             "track_obj_ptr_vaddr": hex(TRACK_OBJ_PTR_VA),
         }

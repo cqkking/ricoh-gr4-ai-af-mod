@@ -50,7 +50,6 @@ from stage3_ai_patcher import (
     STATUS_VA,
     TENSOR_IN_VA,
     TENSOR_OUT_VA,
-    TRACK_SLOT0_VA,
     UPDATE_TRACK_VA,
     GR4_BASE,
 )
