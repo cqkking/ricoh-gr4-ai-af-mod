@@ -48,7 +48,8 @@ TRACK_SLOT0_VA    = 0x53fe1a94 # Primary AF tracking slot
 LV_IMAGE_SVC_VA   = 0x55395a18 # [0x55395a18 + 8] -> p_liveview_buf
 
 HOOK_SITE_VA      = 0x536520f0 # LiveViewProcess3aContoller entry
-RETURN_SITE_VA    = 0x536520f8 # Return after mov ip, sp; push {r4..pc}
+RESUME_SITE_VA    = 0x53652108 # Resume at ldr r6, [r4] after prologue
+RETURN_SITE_VA    = 0x53652108 # Alias for backward compatibility
 
 def encode_arm_branch(from_va: int, to_va: int, is_bl: bool = False) -> int:
     disp = to_va - (from_va + 8)
@@ -70,7 +71,7 @@ def emit_ldr_imm32(insns: list, rd: int, val: int):
     insns.append(encode_movw(rd, val & 0xffff))
     insns.append(encode_movt(rd, (val >> 16) & 0xffff))
 
-def build_stage3_cave_payload(cave_va: int = CAVE_VA, return_va: int = RETURN_SITE_VA) -> bytes:
+def build_stage3_cave_payload(cave_va: int = CAVE_VA, resume_va: int = RESUME_SITE_VA) -> bytes:
     insns = []
     labels = {}
     relocs = [] # (index, label_name, is_bl)
@@ -83,13 +84,19 @@ def build_stage3_cave_payload(cave_va: int = CAVE_VA, return_va: int = RETURN_SI
         relocs.append((idx, target_label, is_bl, cond))
         insns.append(0) # placeholder
 
-    # 1. Overwritten instructions from LiveViewProcess3aContoller (0x536520f0)
+    # 1. Complete standard APCS frame construction for LiveViewProcess3aContoller
+    #    (replaces 0x536520f0..0x53652104 before any subroutine call can corrupt ip)
     insns.append(0xe1a0c00d) # mov  ip, sp
-    insns.append(0xe92dd8f0) # push {r4, r5, r6, r7, fp, ip, lr, pc}
+    insns.append(0xe92dd8f0) # push {r4, r5, r6, r7, fp, ip, lr, pc} (32 bytes)
+    insns.append(0xe24cb004) # sub  fp, ip, #4 (fp is now safely established!)
+    insns.append(0xe24dd008) # sub  sp, sp, #8 (local frame allocation, SP remains 8-byte aligned)
 
-    # 2. Save scratch registers r0-r3, lr (and allocate 16 bytes stack for args)
-    insns.append(0xe92d400f) # push {r0, r1, r2, r3, lr}
-    insns.append(0xe24dd010) # sub  sp, sp, #16 (stack frame for outgoing args)
+    # 2. Save incoming caller arguments r0-r3 and callee-saved registers r4-r8, lr
+    #    Allocate 8 bytes outgoing args area for SendMessage (&msg) and UpdateTrackTarget (H, Conf)
+    #    Strict 8-byte alignment: 16 bytes + 24 bytes + 8 bytes = 48 bytes (48 % 8 == 0)
+    insns.append(0xe92d000f) # push {r0, r1, r2, r3}         (16 bytes)
+    insns.append(0xe92d41f0) # push {r4, r5, r6, r7, r8, lr} (24 bytes)
+    insns.append(0xe24dd008) # sub  sp, sp, #8               (8 bytes outgoing args area)
 
     # 3. Call DspFactory::GetDspService() -> r0
     curr_pc = cave_va + len(insns) * 4
@@ -314,10 +321,13 @@ def build_stage3_cave_payload(cave_va: int = CAVE_VA, return_va: int = RETURN_SI
 
     # --- Common Exit Point ---
     mark_label("exit")
-    insns.append(0xe28dd010) # add  sp, sp, #16 (deallocate stack frame)
-    insns.append(0xe8bd400f) # pop  {r0, r1, r2, r3, lr}
+    insns.append(0xe28dd008) # add  sp, sp, #8 (deallocate outgoing args area)
+    insns.append(0xe8bd41f0) # pop  {r4, r5, r6, r7, r8, lr} (restore callee-saved)
+    insns.append(0xe8bd000f) # pop  {r0, r1, r2, r3}         (restore caller arguments)
+    insns.append(0xe30649c8) # movw r4, #0x69c8              (prologue continuation)
+    insns.append(0xe345450b) # movt r4, #0x550b
     curr_pc = cave_va + len(insns) * 4
-    insns.append(encode_arm_branch(curr_pc, return_va, is_bl=False))
+    insns.append(encode_arm_branch(curr_pc, resume_va, is_bl=False))
 
     # Resolve all label branches
     for idx, label_name, is_bl, cond in relocs:

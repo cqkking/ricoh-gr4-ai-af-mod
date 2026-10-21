@@ -118,12 +118,13 @@ This matches the exact byte length of the Pentax K-3 Mark III DSP firmware secti
    - `DF_ID_S.BIN` (65,536 bytes)
    - `DF_IP.BIN` (16,384 bytes)
 3. Copy the patched firmware image to the **SD card root** as `fwdc248b.bin`:
-   - Use `output/fwdc248b_stage3_ai_track.bin` (or `output/fwdc248b.bin`).
+   - **Recommended First Step**: Flash Stage 2 minimal verification firmware `output/fwdc248b_stage2_dsp_wake.bin` first to verify clean startup and hardware DSP ignition.
+   - Once verified, flash Stage 3 full AI tracking firmware `output/fwdc248b_stage3_ai_track.bin`.
 
 Your SD card root directory will look like:
 ```text
 SD Card Root (A:\)
-├── fwdc248b.bin       (38,781,980 bytes - Flashable firmware)
+├── fwdc248b.bin       (38,693,256 B [Stage 2] or 38,781,980 B [Stage 3])
 ├── DF_EX.BIN          ( 4,112,408 bytes - CEVA-CV Execution partition)
 ├── DF_ID_S.BIN        (    65,536 bytes - Neural Network weights)
 └── DF_IP.BIN          (    16,384 bytes - Reset vector table)
@@ -141,14 +142,35 @@ SD Card Root (A:\)
 
 ---
 
-## 4. Safety & Brick-Prevention Engineering
+## 4. Safety, Brick-Prevention & Emergency Recovery Guide
 
-1. **Dual 32-bit Word-Sum Validation (`word_sum == 0`)**:
+### Emergency Recovery (If Camera Fails to Boot Normally)
+> [!TIP]
+> **Your camera is NOT permanently bricked!**
+> This project **never touches** the bootloader partitions (`00_BOOTPARA.bin` through `04_BOOT.bin` / IPL).
+> The camera's built-in emergency recovery mode runs from the boot ROM / IPL before RTOS executes. Even if the RTOS image hangs or crashes, the bootloader update mode remains 100% operational.
+
+**Unbricking Steps:**
+1. **Power Off**: If the camera is unresponsive (black screen or power LED on), remove the battery for 10 seconds and reinsert.
+2. **Prepare SD Card**: Place the official unmodified `fwdc248b.bin` (v1.11 stock firmware) or the fixed `fwdc248b_stage2_dsp_wake.bin` on the root of your SD card (named `fwdc248b.bin`).
+3. **Trigger Hardware Update Mode**:
+   - Make sure the camera is completely OFF.
+   - **Press and hold the `MENU` (or `DISP`) button**.
+   - While continuing to hold `MENU` / `DISP`, press the **Power** button.
+   - The camera will bypass RTOS and launch the official `Firmware Update` screen directly.
+   - Select **Yes** to flash back clean firmware and restore normal operation!
+
+### Low-Level Architecture Safeguards
+1. **AAPCS 8-Byte Stack Alignment & Full APCS Frame Construction**:
+   - The code cave executes a complete APCS frame construction (`mov ip, sp; push {r4-r7, fp, ip, lr, pc}; sub fp, ip, #4; sub sp, sp, #8`) before any function call.
+   - Registers `r0-r3` (16 bytes) and `r4-r8, lr` (24 bytes) are preserved on strictly double-word (8-byte) aligned boundaries.
+   - The code cave returns directly to `0x53652108` (`ldr r6, [r4]`), eliminating any reliance on scratch register `ip` (R12), preventing frame pointer corruption and eliminating CPU Data/Prefetch Abort exceptions.
+2. **Dual 32-bit Word-Sum Validation (`word_sum == 0`)**:
    - Both the inner payload (`payload.bin`) and outer LZSS container (`fwdc248b.bin`) enforce rigorous 32-bit little-endian zero-sum checksums.
    - The official bootloader (`04_BOOT.bin`) and update utility (`FWUPD`) will reject corrupted files. Every build produced by our pipeline passes 100% round-trip validation.
-2. **Safe Fallback**:
-   - If the SD card is removed or the `DF_*.BIN` files are absent, the code cave's safety check (`tst r2, #2`) aborts gracefully within 12 clock cycles. The camera boots normally with stock contrast/hybrid AF.
-3. **Completely Reversible**:
+3. **Graceful Fallback & NULL Protection**:
+   - If SD card binaries are absent or `m_dspService` is not yet initialized at early boot, the code cave safely exits back to the native camera sequence within ~10 clock cycles with zero side effects.
+4. **Completely Reversible**:
    - You can reflash the official factory `v1.11` firmware at any time using the standard update menu.
 
 ---

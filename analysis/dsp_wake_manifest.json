@@ -4,7 +4,7 @@
   "flashable_firmware": {
     "path": "d:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\fwdc248b.bin",
     "size": 38693256,
-    "sha256": "dc20d73b193a4a626e45601bd953105dab9d52db14f7984bddce21d85f4096d8"
+    "sha256": "ed8c4e2414ffd66e270bb308a3d3c932a4de8300e57e6cc0fb1fc8f0fffd836e"
   },
   "sd_card_dependencies": {
     "DF_EX.BIN": {
@@ -30,8 +30,8 @@
   "patch_details": {
     "hook_va": "0x536520f0",
     "cave_va": "0x53000e00",
-    "return_va": "0x536520f8",
-    "cave_size_bytes": 108,
+    "return_va": "0x53652108",
+    "cave_size_bytes": 132,
     "trampoline_bytes": "42bbe6ea0000a0e1"
   },
   "execution_model": "Camera boots -> LiveView starts -> Trampoline branches to 0x53000e00 -> Loads DF_EX/ID_S/IP from SD card (A:\\) -> Unresets and starts CEVA-CV DSP -> Runs CEVA Version test -> Returns to LiveView sequence cleanly."

@@ -29,7 +29,8 @@ LOAD_DSP_VA       = 0x53966d74 # DspService::LoadDsp(svc, 'A', 0, 0)
 START_DSP_VA      = 0x53966214 # DspService::Start(svc, 0, 0)
 TEST_DSP_VA       = 0x53966f18 # DspService::Test(svc, 0)
 HOOK_SITE_VA      = 0x536520f0 # LiveViewProcess3aContoller entry
-RETURN_SITE_VA    = 0x536520f8 # Return after mov ip, sp; push {r4..pc}
+RESUME_SITE_VA    = 0x53652108 # Resume at ldr r6, [r4] after prologue
+RETURN_SITE_VA    = 0x53652108 # Alias for backward compatibility
 
 def encode_arm_branch(from_va: int, to_va: int, is_bl: bool = False) -> int:
     disp = to_va - (from_va + 8)
@@ -37,17 +38,20 @@ def encode_arm_branch(from_va: int, to_va: int, is_bl: bool = False) -> int:
     op = 0xeb000000 if is_bl else 0xea000000
     return op | disp_words
 
-def build_cave_payload(cave_va: int = CAVE_VA, return_va: int = RETURN_SITE_VA) -> bytes:
+def build_cave_payload(cave_va: int = CAVE_VA, resume_va: int = RESUME_SITE_VA) -> bytes:
     insns = []
     
-    # 1. Overwritten instructions from LiveViewProcess3aContoller (0x536520f0):
-    #   0x536520f0: mov ip, sp
-    #   0x536520f4: push {r4, r5, r6, r7, fp, ip, lr, pc}
+    # 1. Complete standard APCS frame construction for LiveViewProcess3aContoller
+    #    (replaces 0x536520f0..0x53652104 before any subroutine call can corrupt ip)
     insns.append(0xe1a0c00d) # mov  ip, sp
-    insns.append(0xe92dd8f0) # push {r4, r5, r6, r7, fp, ip, lr, pc}
+    insns.append(0xe92dd8f0) # push {r4, r5, r6, r7, fp, ip, lr, pc} (32 bytes)
+    insns.append(0xe24cb004) # sub  fp, ip, #4 (fp is now safely and permanently established!)
+    insns.append(0xe24dd008) # sub  sp, sp, #8 (local frame allocation, SP remains 8-byte aligned)
     
-    # 2. Save scratch registers r0-r3, lr
-    insns.append(0xe92d400f) # push {r0, r1, r2, r3, lr}
+    # 2. Save incoming caller arguments r0-r3 and callee-saved registers r4-r8, lr
+    #    Strict 8-byte alignment: 16 bytes + 24 bytes = 40 bytes (40 % 8 == 0)
+    insns.append(0xe92d000f) # push {r0, r1, r2, r3}           (16 bytes)
+    insns.append(0xe92d41f0) # push {r4, r5, r6, r7, r8, lr}   (24 bytes)
     
     # 3. Call DspFactory::GetDspService() -> r0
     curr_pc = cave_va + len(insns) * 4
@@ -98,11 +102,17 @@ def build_cave_payload(cave_va: int = CAVE_VA, return_va: int = RETURN_SITE_VA) 
         disp_words = (exit_idx - (idx + 2)) & 0x00ffffff
         insns[idx] |= disp_words
         
-    insns.append(0xe8bd400f) # pop  {r0, r1, r2, r3, lr}
+    # Restore callee-saved registers and caller arguments
+    insns.append(0xe8bd41f0) # pop  {r4, r5, r6, r7, r8, lr}
+    insns.append(0xe8bd000f) # pop  {r0, r1, r2, r3}
     
-    # 10. Branch back to LiveViewProcess3aContoller return site (0x536520f8)
+    # 10. Execute remaining prologue instruction: r4 = 0x550b69c8
+    insns.append(0xe30649c8) # movw r4, #0x69c8
+    insns.append(0xe345450b) # movt r4, #0x550b
+    
+    # 11. Branch cleanly to LiveViewProcess3aContoller resume site (0x53652108: ldr r6, [r4])
     curr_pc = cave_va + len(insns) * 4
-    insns.append(encode_arm_branch(curr_pc, return_va, is_bl=False))
+    insns.append(encode_arm_branch(curr_pc, resume_va, is_bl=False))
     
     payload = struct.pack(f"<{len(insns)}I", *insns)
     return payload
