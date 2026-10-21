@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build_stage3_firmware.py - Pack Verified Stage 3 AI Live View Tracking Firmware
+build_stage3_firmware.py - Pack Verified Stage 3 Dual-Hook AI Live View Tracking Firmware
 
 Builds:
   1. Preserved Stage 3 Firmware: output/fwdc248b_stage3_ai_track.bin
@@ -41,16 +41,21 @@ from dsp_splitter import extract_dsp_files
 from verify_dsp_payload import verify_dsp
 from stage3_ai_patcher import (
     apply_stage3_patch,
+    CAVE1_VA,
+    CAVE2_VA,
     CAVE_VA,
+    HOOK1_SITE_VA,
+    HOOK2_SITE_VA,
     HOOK_SITE_VA,
-    RETURN_SITE_VA,
+    HOOK1_RESUME_VA,
+    HOOK2_FALLBACK_VA,
+    HOOK2_AI_RESUME_VA,
     DESC_TABLE_VA,
     MEAN_TABLE_VA,
     STD_TABLE_VA,
     STATUS_VA,
     TENSOR_IN_VA,
     TENSOR_OUT_VA,
-    UPDATE_TRACK_VA,
     GR4_BASE,
 )
 
@@ -82,13 +87,15 @@ def build_stage3_release():
     verify_container(raw_fw, payload, consumed)
     print(f"  -> Official payload decoded: {len(payload):,} bytes")
 
-    # 3. Apply Stage 3 Deep Learning Tracking Patches
-    print("\n[Step 3/4] Splicing Stage 3 Code Cave, Live View Trampoline & AI Tables...")
+    # 3. Apply Stage 3 Dual-Hook Deep Learning Tracking Patches
+    print("\n[Step 3/4] Splicing Stage 3 Dual Caves, Trampolines & AI Tables...")
     buf = bytearray(payload)
     patch_manifest = apply_stage3_patch(buf, rtos_payload_offset=RTOS_PAYLOAD_START)
 
-    print(f"  [+] Injected Code Cave ({patch_manifest['code_cave']['length']} B) @ VA {patch_manifest['code_cave']['vaddr']}")
-    print(f"  [+] Injected Trampoline ({len(bytes.fromhex(patch_manifest['trampoline']['patched_hex']))} B) @ VA {patch_manifest['trampoline']['vaddr']}")
+    h1 = patch_manifest["dual_hooks"]["hook1_boot_awakening"]
+    h2 = patch_manifest["dual_hooks"]["hook2_continuous_ai_af"]
+    print(f"  [+] Hook 1 (Boot Wakeup): {h1['cave_length']} B Cave @ VA {h1['cave_vaddr']}, Hook @ VA {h1['site_vaddr']}")
+    print(f"  [+] Hook 2 (LiveView AI): {h2['cave_length']} B Cave @ VA {h2['cave_vaddr']}, Hook @ VA {h2['site_vaddr']}")
     print(f"  [+] Embedded Desc Table ({patch_manifest['embedded_tables']['desc_table']['length']} B) @ VA {patch_manifest['embedded_tables']['desc_table']['vaddr']}")
     print(f"  [+] Embedded Mean Table ({patch_manifest['embedded_tables']['mean_table']['length']} B) @ VA {patch_manifest['embedded_tables']['mean_table']['vaddr']}")
     print(f"  [+] Embedded Std Table  ({patch_manifest['embedded_tables']['std_table']['length']} B) @ VA {patch_manifest['embedded_tables']['std_table']['vaddr']}")
@@ -122,7 +129,8 @@ def build_stage3_release():
 
     # Save release manifest
     manifest = {
-        "release_type": "Stage 3 Deep Learning Inference Pipeline & Live View Tracking Bridge",
+        "release_type": "Stage 3 Dual-Hook Deep Learning Inference Pipeline & Live View Tracking Bridge",
+        "version": "1.0.4",
         "official_fw_sha256": sha256_hex(raw_fw),
         "stage2_preserved_fw": {
             "path": str(STAGE2_FW),
@@ -137,16 +145,17 @@ def build_stage3_release():
         "sd_card_dependencies": sd_manifest["files"],
         "patch_manifest": patch_manifest,
         "runtime_pipeline": {
-            "hook_location": "FaceDetectionService::Task (0x5386ea8c) - continuous LiveView AF thread",
+            "hook1_boot_awakening": "LiveViewProcess3aContoller (0x536520f0) -> Cave 1 (0x53000d60) loads and starts CEVA-CV DSP once on startup",
+            "hook2_continuous_ai_af": "FaceDetectionService::Task (0x5386ea8c) -> Cave 2 (0x53000e00) runs inference every 2 frames (~30 fps)",
             "decimation": "Every 2 Live View frames (~30 fps inference)",
             "frame_source": "CaptureControlService [0x55395a18, #8] -> [m_CaptureViewControlService, #4]",
             "downsampler": "960x640 YUV LiveView -> 56x56 RGB tensor @ 0x51600000",
-            "dsp_inference": "msg_id 4 via SendMessage (0x539663c0) & WaitMessage (0x539666dc)",
+            "dsp_inference": "msg_id 4 via SendMessage (0x539663c0) & WaitMessage (0x539666dc, timeout 50 ms)",
             "output_heatmap": "64x64 peak scan @ 0x51610000",
             "confidence_threshold": 60,
             "face_result_structure": "m_DetectedFaceResult [r4, #0x78] + face_count [r4, #0x38, #0x30]",
-            "af_tracking_target": "UpdateTrackTarget (0x538e32c4) on [r4 + 8] & [0x550b6aa4]",
-            "lcd_osd_rendering": "UpdateFaceDetectionResult (0x5386e0e4) renders green AI Face/Eye box on LCD",
+            "af_tracking_target": "Native dispatch via UpdateFaceDetectionResult (0x5386e0e4); ZERO calls to 0x538e32c4 (CreateTask)",
+            "lcd_osd_rendering": "UpdateFaceDetectionResult (0x5386e0e4) renders green AI Face/Eye box on LCD and delivers to AF",
             "fallback_mechanism": "FotoNation LibAHFD (0x5383ec84) when confidence < 60",
             "af_system": "GR4 165-point on-sensor PDAF (Zaf) locks onto detected subject centroid"
         }
@@ -158,20 +167,32 @@ def build_stage3_release():
 
     # Disassembly verification on final patched binary
     md = Cs(CS_ARCH_ARM, CS_MODE_ARM)
-    print("\n=== Disassembly of Rebuilt LiveView Hook in Flashable Image ===")
-    tramp_poff = v2p(HOOK_SITE_VA)
-    tramp_in_fw = again[tramp_poff : tramp_poff + 8]
-    for ins in md.disasm(tramp_in_fw, HOOK_SITE_VA):
+    print("\n=== Disassembly of Rebuilt Hook 1 (0x536520f0) in Flashable Image ===")
+    tramp1_poff = v2p(HOOK1_SITE_VA)
+    tramp1_in_fw = again[tramp1_poff : tramp1_poff + 8]
+    for ins in md.disasm(tramp1_in_fw, HOOK1_SITE_VA):
         print(f"    0x{ins.address:08x}: {ins.mnemonic:8s} {ins.op_str}")
 
-    print("\n=== First 20 Instructions of Code Cave in Flashable Image ===")
-    cave_poff = v2p(CAVE_VA)
-    cave_in_fw = again[cave_poff : cave_poff + 80]
-    for ins in md.disasm(cave_in_fw, CAVE_VA):
+    print("\n=== Disassembly of Rebuilt Hook 2 (0x5386ea8c) in Flashable Image ===")
+    tramp2_poff = v2p(HOOK2_SITE_VA)
+    tramp2_in_fw = again[tramp2_poff : tramp2_poff + 8]
+    for ins in md.disasm(tramp2_in_fw, HOOK2_SITE_VA):
+        print(f"    0x{ins.address:08x}: {ins.mnemonic:8s} {ins.op_str}")
+
+    print("\n=== Cave 1 (0x53000d60) Snippet in Flashable Image ===")
+    c1_poff = v2p(CAVE1_VA)
+    c1_in_fw = again[c1_poff : c1_poff + 32]
+    for ins in md.disasm(c1_in_fw, CAVE1_VA):
+        print(f"    0x{ins.address:08x}: {ins.mnemonic:8s} {ins.op_str}")
+
+    print("\n=== Cave 2 (0x53000e00) Snippet in Flashable Image ===")
+    c2_poff = v2p(CAVE2_VA)
+    c2_in_fw = again[c2_poff : c2_poff + 32]
+    for ins in md.disasm(c2_in_fw, CAVE2_VA):
         print(f"    0x{ins.address:08x}: {ins.mnemonic:8s} {ins.op_str}")
 
     print("\n" + "=" * 70)
-    print("SUCCESS: Stage 3 AI Live View Tracking Firmware Built & Verified!")
+    print("SUCCESS: Stage 3 Dual-Hook AI Live View Tracking Firmware Built & Verified!")
     print("=" * 70)
 
 if __name__ == "__main__":

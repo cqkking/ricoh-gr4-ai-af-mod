@@ -1,5 +1,6 @@
 {
-  "release_type": "Stage 3 Deep Learning Inference Pipeline & Live View Tracking Bridge",
+  "release_type": "Stage 3 Dual-Hook Deep Learning Inference Pipeline & Live View Tracking Bridge",
+  "version": "1.0.4",
   "official_fw_sha256": "a2f664dfca034059eb0fd6e18ab08684c326b4a034d85c164dad7e1ec9b5655f",
   "stage2_preserved_fw": {
     "path": "d:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\fwdc248b_stage2_dsp_wake.bin",
@@ -8,8 +9,8 @@
   },
   "stage3_firmware": {
     "path": "d:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\fwdc248b_stage3_ai_track.bin",
-    "size": 38782892,
-    "sha256": "ef97a08832ad84909671d72067c4b277b7e5be09096cb27caa668672694bc8b2"
+    "size": 38791732,
+    "sha256": "edd0aa6184f03b6c75ccd1fd23408fd8fe521e073e4f69b4d520cb8a14cc24fc"
   },
   "sd_card_dependencies": {
     "DF_EX.BIN": {
@@ -34,11 +35,32 @@
   },
   "patch_manifest": {
     "stage": "Stage 3 Deep Learning Inference Pipeline & Live View Tracking Bridge",
+    "dual_hooks": {
+      "hook1_boot_awakening": {
+        "site_vaddr": "0x536520f0",
+        "offset": "0x669e00",
+        "original_hex": "0dc0a0e1f0d82de9",
+        "patched_hex": "1abbe6ea0000a0e1",
+        "cave_vaddr": "0x53000d60",
+        "cave_length": 152,
+        "resume_vaddr": "0x53652108"
+      },
+      "hook2_continuous_ai_af": {
+        "site_vaddr": "0x5386ea8c",
+        "offset": "0x88679c",
+        "original_hex": "380094e57b40ffeb",
+        "patched_hex": "db48deea0000a0e1",
+        "cave_vaddr": "0x53000e00",
+        "cave_length": 692,
+        "ai_resume_vaddr": "0x5386ea9c",
+        "fallback_resume_vaddr": "0x5386ea94"
+      }
+    },
     "code_cave": {
       "vaddr": "0x53000e00",
       "offset": "0x18b10",
-      "length": 848,
-      "hex": "0f002de9f0472de908d04de2ac9225eb045090e5000055e39b00000a042095e5010012e31400001a0500a0e14110a0e30020a0e30030a0e3cd9725eb042095e5020012e39000000a0500a0e10010a0e30020a0e3ee9425eb0500a0e10010a0e32c9825eb403502e3603145e3431504e3561144e3001083e5830000ea443502e3603145e3001093e5011081e2001083e5010011e37c00001a183a05e3393545e3083093e5000053e37700000a043093e5000053e37400000a0300a0e1001000e3601145e3760000eb007502e3607145e3000201e3000345e3000087e50000a0e3040087e5000000e3600145e3080087e5800607e3210445e30c0087e540050be31d0445e3100087e5080800e3080040e3140087e50a0c00e30c0c40e3180087e50c0c00e30c0c40e31c0087e5000000e3610145e3200087e5486502e3606145e30000a0e3b000c6e10500a0e10610a0e10420a0e36430a0e300708de5179525eb0500a0e1b010d6e16420a0e30730a0e1d99525eb000050e34300001a000000e3610145e35f0000eb3c0050e33e0000ba0090a0e10f30a0e3910308e00a30a0e3920306e0b450a0e3b470a0e34c3502e3603145e3009083e5048083e5086083e50c5083e5107083e5321088e23c2086e2823088e202c0a0e178a094e500005ae31300000a00808ae504608ae508508ae50c708ae510108ae514208ae518308ae51cc08ae55a1088e2822086e220108ae524208ae53c908ae5383094e5000053e30300000a0110a0e3301083e50010a0e3341083e5080084e20810a0e10620a0e10530a0e100708de504908de59c8823eba43a06e30b3545e3000093e5000050e30500000a0810a0e10620a0e10530a0e100708de504908de5918823eb08d08de2f047bde80f00bde883b621ea08d08de2f047bde80f00bde8380094e5f8f620eb7bb621ea70402de90020a0e30040a0e30030a0e31150a0e3930505e00b60a0e3920606e0c0c300e39c0606e0065085e00560d0e70460c1e7014084e20460c1e7014084e20460c1e7014084e2013083e2380053e3eeffffba012082e2380052e3eaffffba7080bde870402de90010a0e30020a0e30030a0e3004001e30350d0e7010055e1010000da0510a0e10320a0e1013083e2040053e1f7ffffba3f6002e22223a0e10100a0e10610a0e17080bde8"
+      "length": 692,
+      "hex": "0f002de9f0472de908d04de2ac9225eb045090e5000055e37400000a042095e5010012e37100000a443502e3603145e3001093e5011081e2001083e5010011e36a00001a183a05e3393545e3083093e5000053e36500000a043093e5000053e36200000a0300a0e1001000e3601145e3640000eb007502e3607145e3000201e3000345e3000087e50000a0e3040087e5000000e3600145e3080087e5800607e3210445e30c0087e540050be31d0445e3100087e5080800e3080040e3140087e50a0c00e30c0c40e3180087e50c0c00e30c0c40e31c0087e5000000e3610145e3200087e5486502e3606145e30000a0e3b000c6e10500a0e10610a0e10420a0e33230a0e300708de52c9525eb0500a0e1b010d6e13220a0e30730a0e1ee9525eb000050e33100001a000000e3610145e34d0000eb3c0050e32c0000ba0090a0e10f30a0e3910308e00a30a0e3920306e0b450a0e3b470a0e34c3502e3603145e3009083e5048083e5086083e50c5083e5107083e5321088e23c2086e2823088e202c0a0e178a094e500005ae31300000a00808ae504608ae508508ae50c708ae510108ae514208ae518308ae51cc08ae55a1088e2822086e220108ae524208ae53c908ae5383094e5000053e30300000a0110a0e3301083e50010a0e3341083e508d08de2f047bde80f00bde8aab621ea08d08de2f047bde80f00bde8380094e51ff720eba2b621ea70402de90020a0e30040a0e30030a0e31150a0e3930505e00b60a0e3920606e0c0c300e39c0606e0065085e00560d0e70460c1e7014084e20460c1e7014084e20460c1e7014084e2013083e2380053e3eeffffba012082e2380052e3eaffffba7080bde870402de90010a0e30020a0e30030a0e3004001e30350d0e7010055e1010000da0510a0e10320a0e1013083e2040053e1f7ffffba3f6002e22223a0e10100a0e10610a0e17080bde8"
     },
     "trampoline": {
       "vaddr": "0x5386ea8c",
@@ -72,22 +94,24 @@
       "runtime_status_vars": "0x51602540"
     },
     "af_tracking_bridge": {
-      "update_target_vaddr": "0x538e32c4",
+      "update_target_vaddr": "0x0",
       "track_obj_ptr_vaddr": "0x550b6aa4",
-      "fd_lib_detect_vaddr": "0x5383ec84"
+      "fd_lib_detect_vaddr": "0x5383ec84",
+      "update_face_result_vaddr": "0x5386e0e4"
     }
   },
   "runtime_pipeline": {
-    "hook_location": "FaceDetectionService::Task (0x5386ea8c) - continuous LiveView AF thread",
+    "hook1_boot_awakening": "LiveViewProcess3aContoller (0x536520f0) -> Cave 1 (0x53000d60) loads and starts CEVA-CV DSP once on startup",
+    "hook2_continuous_ai_af": "FaceDetectionService::Task (0x5386ea8c) -> Cave 2 (0x53000e00) runs inference every 2 frames (~30 fps)",
     "decimation": "Every 2 Live View frames (~30 fps inference)",
     "frame_source": "CaptureControlService [0x55395a18, #8] -> [m_CaptureViewControlService, #4]",
     "downsampler": "960x640 YUV LiveView -> 56x56 RGB tensor @ 0x51600000",
-    "dsp_inference": "msg_id 4 via SendMessage (0x539663c0) & WaitMessage (0x539666dc)",
+    "dsp_inference": "msg_id 4 via SendMessage (0x539663c0) & WaitMessage (0x539666dc, timeout 50 ms)",
     "output_heatmap": "64x64 peak scan @ 0x51610000",
     "confidence_threshold": 60,
     "face_result_structure": "m_DetectedFaceResult [r4, #0x78] + face_count [r4, #0x38, #0x30]",
-    "af_tracking_target": "UpdateTrackTarget (0x538e32c4) on [r4 + 8] & [0x550b6aa4]",
-    "lcd_osd_rendering": "UpdateFaceDetectionResult (0x5386e0e4) renders green AI Face/Eye box on LCD",
+    "af_tracking_target": "Native dispatch via UpdateFaceDetectionResult (0x5386e0e4); ZERO calls to 0x538e32c4 (CreateTask)",
+    "lcd_osd_rendering": "UpdateFaceDetectionResult (0x5386e0e4) renders green AI Face/Eye box on LCD and delivers to AF",
     "fallback_mechanism": "FotoNation LibAHFD (0x5383ec84) when confidence < 60",
     "af_system": "GR4 165-point on-sensor PDAF (Zaf) locks onto detected subject centroid"
   }

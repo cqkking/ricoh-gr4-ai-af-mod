@@ -72,14 +72,14 @@ CEVA-CV 矢量协处理器与主控 ARM Cortex-A7 通过 Milbeaut M10V 的多核
        │     ├─ 汇编扫描 4096 字节概率图 (@ 0x51610000) 提取最大峰值 (max_val, col, row)
        │     └─ 门限判定: 若 max_val >= 60 (约 24% 置信度)，触发对焦更新
        │
-       ├─ [步骤 4: 挂接理光原生 AF 跟踪系统]
-       │     ├─ 坐标映射: X = col * 15, Y = row * 10, W = 200, H = 200
-       │     ├─ 写入理光对焦槽位 0 (TrackSlot0 @ 0x53fe1a94)
-       │     └─ 调用 UpdateTrackTarget(TrackObj*, X, Y, W, H, Conf) @ 0x538e32c4
-       │        └─ 理光 165 点片上相位对焦 (ZafPredictor) 立即将相位检测聚焦点平滑锁定在该主体上!
+       ├─ [步骤 4: 挂接理光原生 AF 跟踪系统与 LCD 绿框显示]
+       │     ├─ 坐标映射: X = col * 15, Y = row * 10, W = 180, H = 180，并推算人眼关键点
+       │     ├─ 填入 m_DetectedFaceResult ([r4, #0x78]) 并置 face_count = 1
+       │     └─ 恢复栈帧，跳转 0x5386ea9c 原生调用 UpdateFaceDetectionResult (0x5386e0e4)
+       │        └─ 理光 165 点片上相位对焦 (ZafPredictor) 立即将相位检测聚焦点平滑锁定在该主体上，并在 LCD 渲染绿色对焦框!
        │
        ▼
-返回原流程 [0x536520f8] 继续执行理光原生 3A / 画面渲染循环 (完全平滑，无卡顿)
+返回原流程 [0x5386ea9c] 继续执行理光原生 3A / 画面渲染循环 (完全平滑，无卡顿)
 ```
 
 ---

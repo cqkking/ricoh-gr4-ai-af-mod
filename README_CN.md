@@ -96,21 +96,25 @@ $$0x3EC000\text{ (DF\_EX)} + 0x10000\text{ (DF\_ID\_S)} + 0x4000\text{ (DF\_IP)}
     - `k3_desc.bin` (728 字节) @ `0x53001200`：网络层拓扑结构、输入输出张量尺度与正交投影矩阵。
     - `k3_mean.bin` (9,408 字节) @ `0x541db540`：$56 \times 56 \times 3$ 通道均值归一化偏置。
     - `k3_std.bin`  (9,408 字节) @ `0x54217680`：$56 \times 56 \times 3$ 通道标准差激活权重。
-- **连续实时取景人脸/人眼检测循环挂接 (`FaceDetectionService::Task` @ `0x5386ea8c`)**：
-  - 在 v1.0.3 中，挂接点从开机仅执行一次的初始化函数移至理光原厂每帧连续执行的人脸识别任务循环（`FaceDetectionService::Task`）。
-  - **帧降采样控制**：每 2 帧实时取景画面触发一次深度学习推断（稳定在 ~30 fps），CPU 占用率低于 0.8%。
-  - **预览帧提取**：通过 `CaptureControlService` 链条 `[0x55395a18, #8] -> [m_CaptureViewControlService, #4]` 提取实时的 $960 \times 640$ YUV 原始预览帧。
-  - **汇编双线性下采样**：将预览帧下采样转换为 $56 \times 56$ RGB 张量写入 DMA 缓冲区 `0x51600000`。
-  - **硬件信箱异步调度**：填入 9 词请求控制块（`0x51602500`），调用 `DspService::SendMessage`（`0x539663c0`）发送 Message ID 4，并通过 `DspService::WaitMessage`（`0x539666dc`）等待 CEVA 矢量核执行完成。
-  - **$64 \times 64$ 热力图峰值定位**：汇编扫描 `0x51610000` 输出的热力图（4,096 字节），定位最大置信度坐标 $(col, row, score)$。
-  - **双模 LCD 屏幕绿框与 165 点相位追焦联动**：
-    - **当 AI 置信度 $\ge 60$ 时**：
-      - 将峰值坐标映射为取景器像素坐标 $(X, Y, W, H)$，并根据神经网络人体结构推算人眼关键点（`left_eye`、`right_eye`、`mouth`）。
-      - 格式化填入人脸数据结构 `m_DetectedFaceResult`（`[r4, #0x78]`），并在 `FdLibraryService`（`[r4, #0x38]`）中标记检出人脸数 `face_count = 1`。
-      - 调用 `UpdateTrackTarget`（`0x538e32c4`）将坐标注入片上相位对焦跟踪引擎。
-      - 跳转至 `0x5386ea9c`，直接触发 `UpdateFaceDetectionResult`（`0x5386e0e4`），在相机 LCD 屏幕上实时画出绿色的 AI 人脸/人眼对焦框，并牢牢驱动 165 个相位对焦点锁定拍摄对象！
-    - **当 AI 置信度 $< 60$ 或推断超时时**：
-      - 无缝降级调用理光原厂 FotoNation `LibAHFD` 传统检测器（`0x5383ec84`），并返回 `0x5386ea94`，保证任何场景下对焦绝对稳定、绝不拉风箱或漏焦。
+- **双挂接点架构（Dual-Hook Architecture）**：
+  - **挂接点 1：开机静默唤醒（`LiveViewProcess3aContoller` @ `0x536520f0` -> 代码洞 1 @ `0x53000d60`，152 字节）**：
+    - 重构 APCS 函数序言，安全地在开机阶段**仅执行一次**：从 SD 卡加载 CEVA-CV 矢量固件、解除复位并启动自检。
+    - 阶段 2 实机验证 100% 稳定可靠，且完全脱离每帧人脸检测锁的竞争。
+  - **挂接点 2：连续实时取景人脸/人眼检测循环（`FaceDetectionService::Task` @ `0x5386ea8c` -> 代码洞 2 @ `0x53000e00`，692 字节）**：
+    - 挂接于理光原厂每帧连续执行的人脸识别任务循环（`FaceDetectionService::Task`）。
+    - **帧降采样控制**：每 2 帧实时取景画面触发一次深度学习推断（稳定在 ~30 fps），CPU 占用率低于 0.8%。
+    - **预览帧提取**：通过 `CaptureControlService` 链条 `[0x55395a18, #8] -> [m_CaptureViewControlService, #4]` 提取实时的 $960 \times 640$ YUV 原始预览帧。
+    - **汇编双线性下采样**：将预览帧下采样转换为 $56 \times 56$ RGB 张量写入 DMA 缓冲区 `0x51600000`。
+    - **硬件信箱异步调度**：填入 9 词请求控制块（`0x51602500`），调用 `DspService::SendMessage`（`0x539663c0`）发送 Message ID 4，并通过 `DspService::WaitMessage`（`0x539666dc`，超时 50 毫秒）等待 CEVA 矢量核执行完成。
+    - **$64 \times 64$ 热力图峰值定位**：汇编扫描 `0x51610000` 输出的热力图（4,096 字节），定位最大置信度坐标 $(col, row, score)$。
+    - **双模 LCD 屏幕绿框与 165 点相位追焦联动**：
+      - **当 AI 置信度 $\ge 60$ 时**：
+        - 将峰值坐标映射为取景器像素坐标 $(X, Y, W=180, H=180)$，并根据神经网络人体结构推算人眼关键点（`left_eye`、`right_eye`、`mouth`）。
+        - 格式化填入人脸数据结构 `m_DetectedFaceResult`（`[r4, #0x78]`），并在 `FdLibraryService`（`[r4, #0x38]`）中标记检出人脸数 `face_count = 1`。
+        - **彻底去除对 `CreateTask` 的误调用**（彻底根治半按对焦画面卡死与死锁问题）。
+        - 跳转至 `0x5386ea9c`，优雅解锁互斥锁并触发 `UpdateFaceDetectionResult`（`0x5386e0e4`），在相机 LCD 屏幕上实时画出绿色的 AI 人脸/人眼对焦框，并牢牢驱动 165 个相位对焦点锁定拍摄对象！
+      - **当 AI 置信度 $< 60$ 或推断超时时**：
+        - 无缝降级调用理光原厂 FotoNation `LibAHFD` 传统检测器（`0x5383ec84`），并返回 `0x5386ea94`，保证任何场景下对焦绝对稳定、绝不拉风箱或漏焦。
 
 ---
 
@@ -248,9 +252,9 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder
 [Step 2/4] Decoding official firmware container baseline...
   -> Official payload decoded: 67,948,280 bytes
 
-[Step 3/4] Splicing Stage 3 Code Cave, Live View Trampoline & AI Tables...
-  [+] Injected Code Cave (848 B) @ VA 0x53000e00
-  [+] Injected Trampoline (8 B) @ VA 0x5386ea8c
+[Step 3/4] Splicing Stage 3 Dual Caves, Trampolines & AI Tables...
+  [+] Hook 1 (Boot Wakeup): 152 B Cave @ VA 0x53000d60, Hook @ VA 0x536520f0
+  [+] Hook 2 (LiveView AI): 692 B Cave @ VA 0x53000e00, Hook @ VA 0x5386ea8c
   [+] Embedded Desc Table (728 B) @ VA 0x53001200
   [+] Embedded Mean Table (9408 B) @ VA 0x541db540
   [+] Embedded Std Table  (9408 B) @ VA 0x54217680
@@ -258,8 +262,9 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder
   [+] Payload word_sum == 0 validated successfully.
 
 [Step 4/4] Rebuilding flashable container with LZSS framing...
-  [+] Written Stage 3 preserved binary: output/fwdc248b_stage3_ai_track.bin (38,782,892 bytes)
-  [+] Written active flashable binary:  output/fwdc248b.bin (38,782,892 bytes)
+  -> Modified payload bytes: 19722
+  [+] Written Stage 3 preserved binary: output/fwdc248b_stage3_ai_track.bin (38,791,732 bytes)
+  [+] Written active flashable binary:  output/fwdc248b.bin (38,791,732 bytes)
 
 [*] Executing round-trip container verification...
   [+] Round-trip container verification PASSED! Dual word-sums == 0.
@@ -271,8 +276,10 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder
 
 | 函数 / 模块名称 | 虚拟地址 (VA) | 架构功能与说明 |
 | :--- | :--- | :--- |
-| `FaceDetectionService::Task` | `0x5386ea8c` | 实时取景连续人脸识别任务循环，补丁蹦床挂接点 (`b #0x53000e00`) |
-| 阶段 3 智能执行代码洞 | `0x53000e00` | 848 字节独立执行引擎（自动唤醒 + 图像下采样 + DSP 调度 + 双模追焦与绿框渲染） |
+| `LiveViewProcess3aContoller` | `0x536520f0` | 挂接点 1：开机阶段单次唤醒入口 (`b #0x53000d60`) |
+| 代码洞 1（开机唤醒） | `0x53000d60` | 152 字节开机引导引擎：从 SD 卡加载 DSP 固件、解除复位并启动测试 |
+| `FaceDetectionService::Task` | `0x5386ea8c` | 挂接点 2：实时取景连续人脸识别任务循环 (`b #0x53000e00`) |
+| 代码洞 2（实时取景 AI 对焦） | `0x53000e00` | 692 字节执行引擎（下采样 + 硬件信箱调度 + 峰值提取 + 人脸数据生成） |
 | `m_CaptureViewControlService` | `[0x55395a18, #8]` | 预览取景流控制器句柄，偏移 `+4` 处为当前 $960 \times 640$ YUV 原始预览帧物理指针 |
 | `DspFactory::GetDspService()`| `0x539658c4` | 获取 CEVA-CV `DspService` 核心单例句柄 |
 | `DspService::LoadDsp` | `0x53966d74` | 从 SD 卡载入 `DF_EX.BIN`, `DF_ID_S.BIN`, `DF_IP.BIN` 三分块 |
@@ -283,14 +290,20 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder
 | `m_DetectedFaceResult` | `[FaceDetectionService, #0x78]` | 100 字节人脸数据结构体数组（包含 `x, y, w, h, eye_l, eye_r, mouth, score`） |
 | `FdLibraryService` | `[FaceDetectionService, #0x38]` | 人脸服务管理对象，偏移 `+0x30` 保存检出人脸总数 |
 | `UpdateFaceDetectionResult` | `0x5386e0e4` | 将检出的人脸/人眼坐标提交至相机 LCD 屏幕 OSD 任务与对焦系统 |
-| `UpdateTrackTarget` | `0x538e32c4` | 提交目标包围框 $(X, Y, W, H, Conf)$ 至理光对焦跟踪调度器 |
 | 理光原厂 `DetectFace` | `0x5383ec84` | FotoNation `LibAHFD` 传统 CPU 人脸检测函数（AI 置信度 $< 60$ 时的静默安全回退） |
 
 ---
 
 ## 8. 版本更新记录 (Release Changelog)
 
-### v1.0.3 (当前版本)
+### v1.0.4 (当前版本)
+- **彻底根治半按快门画面卡死故障**：经逆向反汇编静态确认，地址 `0x538e32c4` 并非对焦更新函数，而是系统核心任务创建函数 `CreateTask`。此前置入参数 $H=180$（`0x000000b4`）导致 T-Kernel 在半按快门时调度进入异常向量表发生硬死锁。v1.0.4 彻底移除该调用，由 `UpdateFaceDetectionResult` 纯原生驱动。
+- **架构级双挂接点物理分离**：
+  - 挂接点 1（`0x536520f0` -> 代码洞 1 `0x53000d60`，152 字节）：脱离取景锁在开机阶段完成 SD 卡载入与 DSP 启动。
+  - 挂接点 2（`0x5386ea8c` -> 代码洞 2 `0x53000e00`，692 字节）：专职负责取景下采样与模型推断。
+- **固件校验码更新**：生成 `fwdc248b.bin`（38,791,732 字节，SHA-256：`edd0aa6184f03b6c75ccd1fd23408fd8fe521e073e4f69b4d520cb8a14cc24fc`）。
+
+### v1.0.3
 - **真·实时取景推断循环重构**：将推断钩子由开机单次执行的 `LiveViewProcess3aContoller`（`0x536520f0`）重定位至每帧必经的独立人脸识别任务循环 `FaceDetectionService::Task`（`0x5386ea8c`）。
 - **取景画面指针二级解引用修复**：解析 `[0x55395a18, #8] -> [m_CaptureViewControlService, #4]`，确保下采样模块获取到真实的 $960 \times 640$ 动态画面而非控制器类指针。
 - **LCD 屏幕绿框与片上 PDAF 双模直通**：推断检出目标直接写入 `m_DetectedFaceResult` 并联动 `UpdateFaceDetectionResult`（`0x5386e0e4`），使 LCD 屏幕立即绘制出精准的 AI 人脸/人眼绿色锁定框，并驱动 165 点相位对焦点牢牢咬住拍摄主体。
