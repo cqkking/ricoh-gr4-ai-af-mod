@@ -137,12 +137,17 @@ def build_stage3_release():
         "sd_card_dependencies": sd_manifest["files"],
         "patch_manifest": patch_manifest,
         "runtime_pipeline": {
+            "hook_location": "FaceDetectionService::Task (0x5386ea8c) - continuous LiveView AF thread",
             "decimation": "Every 2 Live View frames (~30 fps inference)",
+            "frame_source": "CaptureControlService [0x55395a18, #8] -> [m_CaptureViewControlService, #4]",
             "downsampler": "960x640 YUV LiveView -> 56x56 RGB tensor @ 0x51600000",
             "dsp_inference": "msg_id 4 via SendMessage (0x539663c0) & WaitMessage (0x539666dc)",
             "output_heatmap": "64x64 peak scan @ 0x51610000",
             "confidence_threshold": 60,
-            "af_tracking_target": "Slot 0 @ 0x53fe1a94 + UpdateTrackTarget (0x538e32c4)",
+            "face_result_structure": "m_DetectedFaceResult [r4, #0x78] + face_count [r4, #0x38, #0x30]",
+            "af_tracking_target": "UpdateTrackTarget (0x538e32c4) on [r4 + 8] & [0x550b6aa4]",
+            "lcd_osd_rendering": "UpdateFaceDetectionResult (0x5386e0e4) renders green AI Face/Eye box on LCD",
+            "fallback_mechanism": "FotoNation LibAHFD (0x5383ec84) when confidence < 60",
             "af_system": "GR4 165-point on-sensor PDAF (Zaf) locks onto detected subject centroid"
         }
     }

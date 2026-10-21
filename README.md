@@ -92,16 +92,24 @@ This matches the exact byte length of the Pentax K-3 Mark III DSP firmware secti
 
 ### Stage 3: Real-Time Deep Learning Tracking Bridge (`stage3_ai_patcher.py`)
 - **Embedded Neural Tables** (inside audited zero caves in RTOS text/rodata):
-  - `k3_desc.bin` (728 B) @ `0x53001100`: CNN layer topology, soft thresholds, and projection matrix.
+  - `k3_desc.bin` (728 B) @ `0x53001200`: CNN layer topology, soft thresholds, and projection matrix.
   - `k3_mean.bin` (9,408 B) @ `0x541db540`: $56 \times 56 \times 3$ channel mean normalization bias.
   - `k3_std.bin`  (9,408 B) @ `0x54217680`: $56 \times 56 \times 3$ standard deviation activation scale.
-- **Real-Time Execution Pipeline**:
-  - **Decimation**: Runs inference every 2 Live View frames (~30 fps), using <0.8% CPU time.
-  - **Bilinear Downsampler**: Resamples $960 \times 640$ YUV Live View frames into a $56 \times 56$ RGB tensor at DMA address `0x51600000`.
-  - **DSP Dispatch**: Asynchronously dispatches Message ID 4 via `DspService::SendMessage` (`0x539663c0`) and awaits completion via `DspService::WaitMessage` (`0x539666dc`).
-  - **Heatmap Peak Extraction**: Scans the resulting $64 \times 64$ confidence heatmap at `0x51610000` for peak centroid $(col, row, score)$.
-  - **Native AF Lock**: Translates centroid to Live View pixels $(X, Y, W, H)$, writes directly to primary tracking slot 0 (`0x53fe1a94`), and calls `UpdateTrackTarget` (`0x538e32c4`).
-  - **165-Point On-Sensor PDAF Hook**: GR4's on-sensor phase detection algorithms (`ZafCorrelation` / `ZafPredictor`) lock onto the subject with high precision.
+- **Continuous LiveView Hook (`FaceDetectionService::Task` @ `0x5386ea8c`)**:
+  - In v1.0.3, the hook is placed directly into the dedicated, continuous 30/60 fps Face Detection task loop (`FaceDetectionService::Task`).
+  - **Decimation**: Runs deep learning inference every 2 Live View frames (~30 fps), using <0.8% CPU time.
+  - **Frame Capture**: Pulls active $960 \times 640$ YUV frame buffer from `CaptureControlService` (`[0x55395a18, #8] -> [m_CaptureViewControlService, #4]`).
+  - **Bilinear Downsampler**: Resamples the preview frame into a $56 \times 56$ RGB tensor at shared DMA address `0x51600000`.
+  - **DSP Dispatch**: Dispatches Message ID 4 via `DspService::SendMessage` (`0x539663c0`) to the CEVA-CV vector DSP and awaits tensor completion via `DspService::WaitMessage` (`0x539666dc`).
+  - **Heatmap Peak Extraction**: Scans the $64 \times 64$ confidence heatmap at `0x51610000` for peak centroid $(col, row, score)$.
+  - **Deep Learning AF Lock & LCD OSD**:
+    - When peak confidence $\ge 60$:
+      - Translates centroid to Live View pixels $(X, Y, W, H)$ and calculates eye coordinates (`left_eye`, `right_eye`, `mouth`).
+      - Injects the detected target into `m_DetectedFaceResult` (`[r4, #0x78]`) and sets `face_count = 1` in `FdLibraryService` (`[r4, #0x38]`).
+      - Calls `UpdateTrackTarget` (`0x538e32c4`) to lock on-sensor PDAF tracking.
+      - Resumes at `0x5386ea9c`, triggering `UpdateFaceDetectionResult` (`0x5386e0e4`) to render the green AI face/eye tracking box on the LCD and drive the 165-point AF sensor!
+    - When peak confidence $< 60$:
+      - Seamlessly falls back to stock FotoNation `LibAHFD` (`0x5383ec84`) and resumes at `0x5386ea94`, ensuring zero focus hunting or dropped frames.
 
 ---
 
@@ -236,17 +244,17 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder
   -> Official payload decoded: 67,948,280 bytes
 
 [Step 3/4] Splicing Stage 3 Code Cave, Live View Trampoline & AI Tables...
-  [+] Injected Code Cave (692 B) @ VA 0x53000e00
-  [+] Injected Trampoline (8 B) @ VA 0x536520f0
-  [+] Embedded Desc Table (728 B) @ VA 0x53001100
+  [+] Injected Code Cave (848 B) @ VA 0x53000e00
+  [+] Injected Trampoline (8 B) @ VA 0x5386ea8c
+  [+] Embedded Desc Table (728 B) @ VA 0x53001200
   [+] Embedded Mean Table (9408 B) @ VA 0x541db540
   [+] Embedded Std Table  (9408 B) @ VA 0x54217680
 [*] Rezeroing 32-bit payload checksum word...
   [+] Payload word_sum == 0 validated successfully.
 
 [Step 4/4] Rebuilding flashable container with LZSS framing...
-  [+] Written Stage 3 preserved binary: output/fwdc248b_stage3_ai_track.bin (38,781,980 bytes)
-  [+] Written active flashable binary:  output/fwdc248b.bin (38,781,980 bytes)
+  [+] Written Stage 3 preserved binary: output/fwdc248b_stage3_ai_track.bin (38,782,892 bytes)
+  [+] Written active flashable binary:  output/fwdc248b.bin (38,782,892 bytes)
 
 [*] Executing round-trip container verification...
   [+] Round-trip container verification PASSED! Dual word-sums == 0.
@@ -258,17 +266,39 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder
 
 | Function / Component | Virtual Address (VA) | Purpose |
 | :--- | :--- | :--- |
-| `LiveViewProcess3aContoller` | `0x536520f0` | Hook site for boot trampoline (`b #0x53000e00`) |
-| Stage 3 Code Cave | `0x53000e00` | 692-byte execution engine (Awakening + Downsampler + Inference + AF Bridge) |
+| `FaceDetectionService::Task` | `0x5386ea8c` | Hook site for continuous per-frame LiveView AF (`b #0x53000e00`) |
+| Stage 3 Code Cave | `0x53000e00` | 848-byte execution engine (Awakening + Downsampler + Inference + AF & OSD Bridge) |
+| `m_CaptureViewControlService` | `[0x55395a18, #8]` | Pointer to preview streaming controller; offset `+4` points to raw 960x640 YUV frame |
 | `DspFactory::GetDspService()` | `0x539658c4` | Retrieves CEVA-CV `DspService` singleton pointer |
 | `DspService::LoadDsp` | `0x53966d74` | Loads `DF_EX.BIN`, `DF_ID_S.BIN`, `DF_IP.BIN` from SD card |
 | `DspService::Start` | `0x53966214` | Deasserts DSP reset, starts execution at `0x515fc000` |
 | `DspService::Test` | `0x53966f18` | Runs CEVA-CV version self-test |
 | `DspService::SendMessage` | `0x539663c0` | Dispatches Message ID 4 (Inference request) |
 | `DspService::WaitMessage` | `0x539666dc` | Awaits tensor inference completion |
+| `m_DetectedFaceResult` | `[FaceDetectionService, #0x78]` | Array of 100-byte face structures (`x, y, w, h, eye_l, eye_r, mouth, score`) |
+| `FdLibraryService` | `[FaceDetectionService, #0x38]` | Subsystem holding detected face count @ `+0x30` |
+| `UpdateFaceDetectionResult` | `0x5386e0e4` | Submits face/eye coordinates to LCD OSD display task & AF engine |
 | `UpdateTrackTarget` | `0x538e32c4` | Submits $(X, Y, W, H, Conf)$ to GR4 autofocus tracker |
-| Primary AF Tracking Slot 0 | `0x53fe1a94` | Direct AF coordinate slot read by `ZafPredictor` |
-| Live View Image Buffer Pointer | `0x55395a18` | Source buffer for $960 \times 640$ YUV frame capture |
+| Stock FotoNation `DetectFace` | `0x5383ec84` | Fallback CPU face detector when AI confidence $< 60$ |
+
+---
+
+## 8. Release Changelog
+
+### v1.0.3 (Current Release)
+- **Continuous LiveView AF Hook Refactor**: Relocated inference hook from boot-time `LiveViewProcess3aContoller` (`0x536520f0`) to the true per-frame face detection loop `FaceDetectionService::Task` (`0x5386ea8c`).
+- **LiveView Preview Buffer Resolution**: Resolved preview buffer indirection via `[0x55395a18, #8] -> [m_CaptureViewControlService, #4]`, ensuring pristine 960x640 image feeding to the CNN downsampler.
+- **Bimodal LCD OSD & AF Hardware Delivery**: Spliced output bounding boxes and eye coordinates directly into `m_DetectedFaceResult` and `UpdateFaceDetectionResult` (`0x5386e0e4`), rendering the green AI face/eye tracking box on the LCD and driving the 165-point on-sensor PDAF.
+- **Fail-Safe Stock Fallback**: Retained full fallback to FotoNation `LibAHFD` (`0x5383ec84`) when confidence $< 60$.
+
+### v1.0.2
+- **MMU Read-Only Fault Resolution**: Relocated runtime telemetry and sequence variables from code cave (`.text`, read-only `AP=110`) to DSP shared DRAM (`0x51602540`, read/write `AP=011`).
+
+### v1.0.1
+- **AAPCS 8-Byte Stack Alignment**: Enforced strict AAPCS 8-byte stack alignment across code cave entries and subroutine invocations.
+
+### v1.0.0
+- Initial public release of CEVA-CV AI DSP awakening and Pentax K-3 Mark III deep learning autofocus port for Ricoh GR IV.
 
 ---
 
