@@ -172,23 +172,27 @@ SD 卡根目录 (C:\)
 ```text
 .
 ├── analysis/
-│   ├── dsp_stage3_manifest.json     # 阶段 3 发布清单与反汇编转储
-│   ├── dsp_wake_manifest.json       # 阶段 2 发布清单
+│   ├── dsp_stage3_manifest.json     # 混合 AI-AF 发布清单与反汇编转储
 │   ├── rtos_decompilation_audit.md  # GR4 RTOS 深度逆向反汇编报告
 │   └── shellcmd_symbols.csv         # 经验证的 RTOS 导出符号表
+├── archive/
+│   └── stage2/                      # 阶段 2 开机免串口点火概念验证归档
+│       ├── build_dsp_firmware.py
+│       ├── dsp_wake_manifest.json
+│       ├── FEAT_DSP_AI_WAKE.md
+│       ├── k3_gr4_dsp_patcher.py
+│       └── verify_dsp_patch.py
 ├── docs/
-│   ├── FEAT_DSP_STAGE3_AI_TRACK.md  # 阶段 3 完整白皮书
-│   ├── FEAT_DSP_AI_WAKE.md          # 阶段 2 完整白皮书
+│   ├── FEAT_DSP_STAGE3_AI_TRACK.md  # 混合 AI-AF 完整白皮书
 │   ├── FEAT_K3_AF_PORT.md           # 宾得 K-3 III 自动对焦移植报告
 │   ├── RELEASE_NOTES_v1.2.0.md      # v1.2.0 版本发布说明
 │   └── RELEASE_NOTES_v1.2.1.md      # v1.2.1 版本发布说明
 ├── src/
 │   └── dsp_ai/
-│       ├── build_stage3_firmware.py # 阶段 3 固件构建与容器封装器
-│       ├── stage3_ai_patcher.py     # 阶段 3 混合 AF 架构与汇编代码洞注入器
-│       ├── build_dsp_firmware.py    # 阶段 2 固件构建器
-│       ├── k3_gr4_dsp_patcher.py    # 阶段 2 汇编注入器
-│       ├── dsp_splitter.py          # 06_DSP.bin 分块提取工具
+│       ├── build_firmware.py        # 固件主构建与容器封装入口
+│       ├── build_stage3_firmware.py # 核心 Stage 3 容器构建器
+│       ├── stage3_ai_patcher.py     # 混合 AF 架构与汇编代码洞注入器
+│       ├── dsp_splitter.py          # 06_DSP.bin -> DF_EX / DF_ID_S / DF_IP 资产提取工具
 │       ├── verify_dsp_payload.py    # 分块字节无损复原校验器
 │       ├── k3_desc.bin              # 提取自 K-3 III 的神经网络描述符 (728 B)
 │       ├── k3_mean.bin              # 提取自 K-3 III 的通道均值矩阵 (9,408 B)
@@ -206,7 +210,7 @@ SD 卡根目录 (C:\)
 
 ```bash
 # 自动切分 DSP 分块、固化神经网络参数、编译注入代码洞并生成最终卡刷固件：
-python src/dsp_ai/build_stage3_firmware.py
+python src/dsp_ai/build_firmware.py
 ```
 
 ---

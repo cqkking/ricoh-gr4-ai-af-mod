@@ -177,23 +177,27 @@ SD Card Root (C:\)
 ```text
 .
 ├── analysis/
-│   ├── dsp_stage3_manifest.json     # Release manifest for Stage 3 build
-│   ├── dsp_wake_manifest.json       # Release manifest for Stage 2 build
+│   ├── dsp_stage3_manifest.json     # Release manifest for AI-AF build
 │   ├── rtos_decompilation_audit.md  # Comprehensive GR4 RTOS reverse engineering audit
 │   └── shellcmd_symbols.csv         # Verified RTOS shell symbols
+├── archive/
+│   └── stage2/                      # Archived Stage 2 early boot-wake proof-of-concept
+│       ├── build_dsp_firmware.py
+│       ├── dsp_wake_manifest.json
+│       ├── FEAT_DSP_AI_WAKE.md
+│       ├── k3_gr4_dsp_patcher.py
+│       └── verify_dsp_patch.py
 ├── docs/
-│   ├── FEAT_DSP_STAGE3_AI_TRACK.md  # Detailed Stage 3 technical whitepaper
-│   ├── FEAT_DSP_AI_WAKE.md          # Detailed Stage 2 DSP awakening whitepaper
+│   ├── FEAT_DSP_STAGE3_AI_TRACK.md  # Detailed AI-AF technical whitepaper
 │   ├── FEAT_K3_AF_PORT.md           # Pentax K-3 III to GR4 AF porting audit
 │   ├── RELEASE_NOTES_v1.2.0.md      # v1.2.0 release notes
 │   └── RELEASE_NOTES_v1.2.1.md      # v1.2.1 release notes
 ├── src/
 │   └── dsp_ai/
-│       ├── build_stage3_firmware.py # Complete Stage 3 packager & container rebuilder
-│       ├── stage3_ai_patcher.py     # Stage 3 ARM assembly code cave generator
-│       ├── build_dsp_firmware.py    # Stage 2 firmware builder
-│       ├── k3_gr4_dsp_patcher.py    # Stage 2 ARM assembly patch generator
-│       ├── dsp_splitter.py          # 06_DSP.bin -> DF_EX / DF_ID_S / DF_IP splitter
+│       ├── build_firmware.py        # Master firmware packager & container rebuilder
+│       ├── build_stage3_firmware.py # Core Stage 3 container builder
+│       ├── stage3_ai_patcher.py     # Hybrid AF ARM assembly code cave generator
+│       ├── dsp_splitter.py          # 06_DSP.bin -> DF_EX / DF_ID_S / DF_IP extractor
 │       ├── verify_dsp_payload.py    # Byte-perfect payload reconstruction verifier
 │       ├── k3_desc.bin              # Extracted DeepLearningService descriptor (728 B)
 │       ├── k3_mean.bin              # Extracted channel mean normalization table (9,408 B)
@@ -218,7 +222,7 @@ SD Card Root (C:\)
 ### Build Command
 ```bash
 # Slices DSP partitions, embeds AI model tables, compiles code cave, and builds flashable container:
-python src/dsp_ai/build_stage3_firmware.py
+python src/dsp_ai/build_firmware.py
 ```
 
 Output:

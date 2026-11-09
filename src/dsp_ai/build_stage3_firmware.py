@@ -7,7 +7,6 @@ Rebased onto official Ricoh GR IV v1.20 baseline firmware.
 Builds:
   1. Preserved Stage 3 Firmware: output/fwdc248b_stage3_ai_track.bin
   2. Active Flashable Firmware:   output/fwdc248b.bin
-     (Ensures Stage 2 binary output/fwdc248b_stage2_dsp_wake.bin is strictly preserved!)
   3. Release Manifest:           analysis/dsp_stage3_manifest.json
 """
 
@@ -24,7 +23,6 @@ TOOLS_DIR = REPO_ROOT / "tools"
 OFFICIAL_FW = REPO_ROOT / "firmware" / "official" / "v1.20" / "fwdc248b.bin"
 OUTPUT_DIR = WORKTREE_ROOT / "output"
 ROOT_OUTPUT_DIR = REPO_ROOT / "output"
-STAGE2_FW = OUTPUT_DIR / "fwdc248b_stage2_dsp_wake.bin"
 STAGE3_FW = OUTPUT_DIR / "fwdc248b_stage3_ai_track.bin"
 ACTIVE_FW = OUTPUT_DIR / "fwdc248b.bin"
 SD_DIR = OUTPUT_DIR / "sd_card"
@@ -70,14 +68,9 @@ def v2p(vaddr: int) -> int:
 
 def build_stage3_release():
     print("=" * 70)
-    print("Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder (v1.2.0)")
+    print("Ricoh GR IV Hybrid AI Live View Tracking Firmware Rebuilder (v1.2.1)")
     print("Baseline: Official Ricoh GR IV Firmware v1.20")
     print("=" * 70)
-
-    # 0. Safety Guard: Check that Stage 2 binary exists and will not be overwritten
-    assert STAGE2_FW.exists(), f"Error: Stage 2 binary {STAGE2_FW} missing!"
-    stage2_bytes_len = len(STAGE2_FW.read_bytes())
-    print(f"[*] Confirmed Stage 2 binary intact: {STAGE2_FW.name} ({stage2_bytes_len:,} bytes)")
 
     # 1. Verify SD card payload files
     print("\n[Step 1/4] Verifying staged SD card DSP binaries...")
@@ -144,16 +137,11 @@ def build_stage3_release():
 
     # Save release manifest
     manifest = {
-        "release_type": "Stage 3 Dual-Hook Deep Learning Inference Pipeline & Live View Tracking Bridge",
-        "version": "1.2.0",
+        "release_type": "Hybrid AF Architecture & Zero-Collision Memory (v1.2.1)",
+        "version": "1.2.1",
         "baseline_firmware": "Official Ricoh GR IV Firmware v1.20",
         "official_fw_sha256": sha256_hex(raw_fw),
-        "stage2_preserved_fw": {
-            "path": str(STAGE2_FW),
-            "size": stage2_bytes_len,
-            "sha256": sha256_hex(STAGE2_FW.read_bytes()),
-        },
-        "stage3_firmware": {
+        "firmware": {
             "path": str(STAGE3_FW),
             "size": len(out_container),
             "sha256": sha256_hex(out_container),

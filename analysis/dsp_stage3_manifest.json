@@ -1,14 +1,9 @@
 {
-  "release_type": "Stage 3 Dual-Hook Deep Learning Inference Pipeline & Live View Tracking Bridge",
-  "version": "1.2.0",
+  "release_type": "Hybrid AF Architecture & Zero-Collision Memory (v1.2.1)",
+  "version": "1.2.1",
   "baseline_firmware": "Official Ricoh GR IV Firmware v1.20",
   "official_fw_sha256": "7563d7e462f0c53b6ab2fbab7cdfbbb57151a41192ee82f4f3a2108f9d77650d",
-  "stage2_preserved_fw": {
-    "path": "D:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\fwdc248b_stage2_dsp_wake.bin",
-    "size": 38693256,
-    "sha256": "ed8c4e2414ffd66e270bb308a3d3c932a4de8300e57e6cc0fb1fc8f0fffd836e"
-  },
-  "stage3_firmware": {
+  "firmware": {
     "path": "D:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\fwdc248b_stage3_ai_track.bin",
     "size": 39109096,
     "sha256": "15bcb7fb254f6c42f5d50c33b6505f7887d422b0f6c1d65c70577363edf1d1c3"
