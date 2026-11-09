@@ -41,9 +41,9 @@ RTOS_PAYLOAD_START     = 0x00017D28
 
 # Cave & Memory Layout in v1.20 ROM
 CAVE1_VA               = 0x53000d60 # Boot-time DSP awakening cave (84 B)
-CAVE2_VA               = 0x53000e00 # Hybrid Continuous LiveView AI AF cave (<= 1600 B)
+CAVE2_VA               = 0x53000e00 # Hybrid Continuous LiveView AI AF cave (<= 2048 B)
 CAVE_VA                = CAVE2_VA   # Backward compatibility alias
-DESC_TABLE_VA          = 0x53001440 # 728 B table placed after code cave (ends @ 0x53001718)
+DESC_TABLE_VA          = 0x53001600 # 728 B table placed after code cave (ends @ 0x530018d8)
 MEAN_TABLE_VA          = 0x54212890 # 9,408 B table inside 13,167 byte ROM zero cave
 STD_TABLE_VA           = 0x5424e9d0 # 9,408 B table inside 16,061 byte ROM zero cave
 
@@ -217,13 +217,31 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe92d47f0) # push {r4, r5, r6, r7, r8, sb, sl, lr}
     insns.append(0xe24dd008) # sub  sp, sp, #8
 
-    # 2. Execute stock LibAHFD face detection first!
+    # 2. Level 1 Hybrid AF: Execute stock LibAHFD face detection first!
     #    r4 is FaceDetectionService*, [r4, #0x38] is FdLibraryService*
     insns.append(0xe5940038) # ldr  r0, [r4, #0x38] (FdLibraryService*)
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, FD_LIB_DETECT_VA, is_bl=True)) # bl 0x53866594
     insns.append(0xe3500000) # cmp  r0, #0
-    branch_to("stock_face_found", is_bl=False, cond=0x0) # beq .stock_face_found (0 == SUCCESS)
+    branch_to("run_ceva_cnn", is_bl=False, cond=0x1) # bne .run_ceva_cnn (if hardware error, fallback to CNN)
+
+    # DetectFace returned 0 (AHFD_OK / ERR_NONE). Parse results into m_DetectedFaceResult:
+    # Call FdLibraryService::GetResults(FdLibraryService* r0, m_DetectedFaceResult* r1)
+    insns.append(0xe5940038) # ldr  r0, [r4, #0x38] (FdLibraryService*)
+    insns.append(0xe5941078) # ldr  r1, [r4, #0x78] (m_DetectedFaceResult*)
+    insns.append(0xe3510000) # cmp  r1, #0
+    branch_to("run_ceva_cnn", is_bl=False, cond=0x0) # beq .run_ceva_cnn
+    curr_pc = cave_va + len(insns) * 4
+    insns.append(encode_arm_branch(curr_pc, FD_LIB_GET_RES_VA, is_bl=True)) # bl 0x5386666c
+
+    # GetResults wrote face_count to [FdLibraryService, #0x30]!
+    # Genuine frontal face found ONLY when face_count > 0:
+    insns.append(0xe5940038) # ldr  r0, [r4, #0x38] (FdLibraryService*)
+    insns.append(0xe5901030) # ldr  r1, [r0, #0x30] (face_count)
+    insns.append(0xe3510000) # cmp  r1, #0
+    branch_to("stock_face_found", is_bl=False, cond=0xc) # bgt .stock_face_found (face_count > 0: genuine frontal face detected!)
+
+    mark_label("run_ceva_cnn")
 
     # 3. Call DspFactory::GetDspService() -> r0
     curr_pc = cave_va + len(insns) * 4
@@ -452,7 +470,7 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe3500000) # cmp  r0, #0
     branch_to("ai_done", is_bl=False, cond=0x1) # bne .ai_done
 
-    # 14. Invalidate ARM D-Cache for output heatmap @ 0x52949a00 (size 0x5400 = 3 * 0x1c00)
+    # 14. Invalidate ARM D-Cache for output heatmap @ 0x52b09a00 (size 0x5400 = 3 * 0x1c00)
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, GET_CACHE_MGR_VA, is_bl=True))
     emit_ldr_imm32(insns, 1, TENSOR_OUT_VA)
@@ -460,7 +478,7 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, INVAL_DCACHE_VA, is_bl=True))
 
-    # 15. Scan 3-channel 56x56 (stride 64) int16_t output heatmap @ 0x52949a00
+    # 15. Scan 3-channel 56x56 (stride 64) int16_t output heatmap @ 0x52b09a00
     emit_ldr_imm32(insns, 0, TENSOR_OUT_VA)
     branch_to("sub_find_peak", is_bl=True, cond=0xe) # returns r0: max_diff, r1: col, r2: row, r3: area_cnt
 
@@ -609,13 +627,14 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(encode_arm_branch(curr_pc, HOOK2_AI_RESUME_VA, is_bl=False))
 
     mark_label("stock_face_found")
-    # Stock LibAHFD detected face(s)!
-    # Restore stack and branch to stock ConvertResult path at HOOK2_FALLBACK_VA (0x53896460)
+    # Stock LibAHFD detected frontal face(s) and GetResults already converted them into [r4, #0x78]!
+    # Restore stack and resume at HOOK2_AI_RESUME_VA (0x538963ac):
+    # Unlocks mutex r6 and calls UpdateFaceDetectionResult(r4) (0x538959f4)
     insns.append(0xe28dd008) # add  sp, sp, #8
     insns.append(0xe8bd47f0) # pop  {r4, r5, r6, r7, r8, sb, sl, lr}
     insns.append(0xe8bd000f) # pop  {r0, r1, r2, r3}
     curr_pc = cave_va + len(insns) * 4
-    insns.append(encode_arm_branch(curr_pc, HOOK2_FALLBACK_VA, is_bl=False))
+    insns.append(encode_arm_branch(curr_pc, HOOK2_AI_RESUME_VA, is_bl=False))
 
     # ---------------------------------------------------------------------
     # Subroutine: Aspect-Ratio-Aware Downsampler + 2.0x Backlit Shadow Recovery
@@ -717,7 +736,7 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
 
     # ---------------------------------------------------------------------
     # Subroutine: Head-Priority 3-Channel 56x56 (Stride 64) int16_t Heatmap Scanner
-    # Input:  r0 = TENSOR_OUT_VA (0x52949a00)
+    # Input:  r0 = TENSOR_OUT_VA (0x52b09a00)
     # Output: r0 = max_diff, r1 = best_col (0..55), r2 = best_row (0..55), r3 = area_cnt
     # ---------------------------------------------------------------------
     mark_label("sub_find_peak")

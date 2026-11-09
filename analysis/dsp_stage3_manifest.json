@@ -1,12 +1,12 @@
 {
-  "release_type": "Hybrid AF Architecture & Zero-Collision Memory (v1.2.1)",
-  "version": "1.2.1",
+  "release_type": "Hybrid AF Architecture & Zero-Collision Memory (v1.2.2)",
+  "version": "1.2.2",
   "baseline_firmware": "Official Ricoh GR IV Firmware v1.20",
   "official_fw_sha256": "7563d7e462f0c53b6ab2fbab7cdfbbb57151a41192ee82f4f3a2108f9d77650d",
   "firmware": {
     "path": "D:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\fwdc248b_stage3_ai_track.bin",
     "size": 39109096,
-    "sha256": "15bcb7fb254f6c42f5d50c33b6505f7887d422b0f6c1d65c70577363edf1d1c3"
+    "sha256": "49ea52a5620c89a59f03cbd79e38bc70dda0a281bdc1dad59c0621d5e1ce8cbf"
   },
   "sd_card_dependencies": {
     "DF_EX.BIN": {
@@ -48,7 +48,7 @@
         "original_hex": "380094e57b40ffeb",
         "patched_hex": "97aaddea0000a0e1",
         "cave_vaddr": "0x53000e00",
-        "cave_length": 1568,
+        "cave_length": 1604,
         "ai_resume_vaddr": "0x538963ac",
         "fallback_resume_vaddr": "0x53896460"
       }
@@ -56,8 +56,8 @@
     "code_cave": {
       "vaddr": "0x53000e00",
       "offset": "0x18b28",
-      "length": 1568,
-      "hex": "0f002de9f0472de908d04de2380094e5df9521eb000050e31501000ad63226eb045090e5000055e30d01000a042095e5040012e33c00001a008100e3c08245e33e21d4e5000052e30300001a002088e5042088e50120a0e33e21c4e5042098e5012082e2042088e5143052e2fc00003a1e0d53e3fa00002a3f0013e3f800001a480084e2fe1a24eb0500a0e14310a0e30020a0e30030a0e3e33726eb000050e30e00001a0500a0e14910a0e30020a0e30030a0e3dc3726eb000050e30700001a0020a0e3042085e5480084e2a03408e3013445e3001093e5941a24ebe00000ea0500a0e1001000e3101245e30020a0e3f53426eb008100e3c08245e3431504e3561144e3001088e5480084e2a03408e3013445e3001093e5841a24eb042095e5040012e3ce00000acd0000ea503301e3083545e30c9093e5242493e5000052e300209215000052e30500000a046092e5000056e30200000a087092e50c8092e5140000ea342493e5000052e300209215000052e30500000a046092e5000056e30200000a087092e50c8092e5090000ea1c2093e5000052e314209305000052e3af00000a0c6092e5000056e3ac00000a107092e5148092e5000059e30298a003125c24eb0610a0e10920a0e1125c24ebbccfd4e100005ce340c10003be9fd4e1000059e3d49000030600a0e1001000e3b01245e30720a0e10830a0e1a00000eb025c24eb001000e3b01245e3ee2ca0e31d5c24eb007000e3c07245e3400401e3000345e3000087e50000a0e3040087e5200087e5240087e5000000e3b00245e3080087e5c00705e3a00245e30c0087e5000000e3960245e3100087e5080800e3080040e3140087e50a0c00e30c0c40e3180087e50c0c00e30c0c40e31c0087e5086100e3c06245e30000a0e3b000c6e10500a0e10610a0e10420a0e36430a0e300708de5f33426eb000050e36c00001a0500a0e1b010d6e16420a0e30730a0e1b33526eb000050e36500001acf5b24eb001a09e3b01245e3152ba0e3ce5b24eb000a09e3b00245e3a80000eb030050e35b0000ba020053e3590000ba0a5ba0e3035385e0170b55e3175ba0c31e9080e2640059e36490a0c3bc3fd4e1000053e340310003910307e04930a0e3930707e02772a0e1be3fd4e1000053e3d430000392030ce04930a0e3930c0ce02cc2a0e1a58057e00080a043a5605ce00060a0430c3100e3c03245e3009083e5048083e5086083e50c5083e5105083e578a094e500005ae33600000a0000a0e30010a0e301008ae7041081e2640051e3fbffffba00808ae504608ae508508ae50c508ae52531a0e1a521a0e1020047e0a30050e00000a04302104ce0a31051e00010a04310008ae514108ae518308ae51c308ae5020087e0a30050e00000a04320008ae524108ae528308ae52c308ae54c908ae5181194e5000051e30110a00350108ae5a52088e0002184e5a52086e0042184e5085184e50c5184e5181184e51c1184e50120a0e33c21c4e50000a0e32101c4e5493f84e2b000c3e1383094e5000053e30300000a0110a0e3301083e50010a0e3341083e508d08de2f047bde80f00bde84d5422ea08d08de2f047bde80f00bde8765422eaf0472de90040a0e314609de5940606e0866186e0a664a0e1960c27e0048381e00050a0e3950c06e0866186e0a664a0e10690d7e7300059e38990a0310200003a900059e348a0a033a9908a3009a0a0e109e0a0e1000052e31600000a000053e31400000a14a09de5940a0ae08aa18ae02aa5a0e1ace0a0e19e0a0ae0a6a08ae00ae0d2e70aa0d3e780e04ee280a04ae24e6149e0ca6046e01660e8e6cee08ee00ee089e01ee0e8e6caa08ae00a9089e01990e8e606a0a0e1056088e00090c6e500aec6e50e6c86e200eec6e5015085e2380055e3d2ffffba0060a0e3386088e53c6088e50e8c88e2386088e53c6088e50e8c88e2386088e53c6088e5014084e2380054e3bfffffbaf087bde8f04f2de90010a0e31c20a0e31c30a0e300b0a0e3074b80e20e5b80e20060a0e30070a0e3068387e08880a0e1f89090e1f8a094e1f8c095e102c04ce20a005ce10ca0a0c109a04ae002005ae301b08ba201005ae1020000da0a10a0e10720a0e10630a0e1017087e2380057e3ecffffba016086e2380056e3e8ffffba0100a0e10210a0e10320a0e10b30a0e1f08fbde8"
+      "length": 1604,
+      "hex": "0f002de9f0472de908d04de2380094e5df9521eb000050e30800001a380094e5781094e5000051e30400000a0e9621eb380094e5301090e5000051e3150100cacd3226eb045090e5000055e30d01000a042095e5040012e33c00001a008100e3c08245e33e21d4e5000052e30300001a002088e5042088e50120a0e33e21c4e5042098e5012082e2042088e5143052e2fc00003a1e0d53e3fa00002a3f0013e3f800001a480084e2f51a24eb0500a0e14310a0e30020a0e30030a0e3da3726eb000050e30e00001a0500a0e14910a0e30020a0e30030a0e3d33726eb000050e30700001a0020a0e3042085e5480084e2a03408e3013445e3001093e58b1a24ebe00000ea0500a0e1001000e3101245e30020a0e3ec3426eb008100e3c08245e3431504e3561144e3001088e5480084e2a03408e3013445e3001093e57b1a24eb042095e5040012e3ce00000acd0000ea503301e3083545e30c9093e5242493e5000052e300209215000052e30500000a046092e5000056e30200000a087092e50c8092e5140000ea342493e5000052e300209215000052e30500000a046092e5000056e30200000a087092e50c8092e5090000ea1c2093e5000052e314209305000052e3af00000a0c6092e5000056e3ac00000a107092e5148092e5000059e30298a003095c24eb0610a0e10920a0e1095c24ebbccfd4e100005ce340c10003be9fd4e1000059e3d49000030600a0e1001000e3b01245e30720a0e10830a0e1a00000ebf95b24eb001000e3b01245e3ee2ca0e3145c24eb007000e3c07245e3000601e3000345e3000087e50000a0e3040087e5200087e5240087e5000000e3b00245e3080087e5c00705e3a00245e30c0087e5000000e3960245e3100087e5080800e3080040e3140087e50a0c00e30c0c40e3180087e50c0c00e30c0c40e31c0087e5086100e3c06245e30000a0e3b000c6e10500a0e10610a0e10420a0e36430a0e300708de5ea3426eb000050e36c00001a0500a0e1b010d6e16420a0e30730a0e1aa3526eb000050e36500001ac65b24eb001a09e3b01245e3152ba0e3c55b24eb000a09e3b00245e3a80000eb030050e35b0000ba020053e3590000ba0a5ba0e3035385e0170b55e3175ba0c31e9080e2640059e36490a0c3bc3fd4e1000053e340310003910307e04930a0e3930707e02772a0e1be3fd4e1000053e3d430000392030ce04930a0e3930c0ce02cc2a0e1a58057e00080a043a5605ce00060a0430c3100e3c03245e3009083e5048083e5086083e50c5083e5105083e578a094e500005ae33600000a0000a0e30010a0e301008ae7041081e2640051e3fbffffba00808ae504608ae508508ae50c508ae52531a0e1a521a0e1020047e0a30050e00000a04302104ce0a31051e00010a04310008ae514108ae518308ae51c308ae5020087e0a30050e00000a04320008ae524108ae528308ae52c308ae54c908ae5181194e5000051e30110a00350108ae5a52088e0002184e5a52086e0042184e5085184e50c5184e5181184e51c1184e50120a0e33c21c4e50000a0e32101c4e5493f84e2b000c3e1383094e5000053e30300000a0110a0e3301083e50010a0e3341083e508d08de2f047bde80f00bde8445422ea08d08de2f047bde80f00bde8405422eaf0472de90040a0e314609de5940606e0866186e0a664a0e1960c27e0048381e00050a0e3950c06e0866186e0a664a0e10690d7e7300059e38990a0310200003a900059e348a0a033a9908a3009a0a0e109e0a0e1000052e31600000a000053e31400000a14a09de5940a0ae08aa18ae02aa5a0e1ace0a0e19e0a0ae0a6a08ae00ae0d2e70aa0d3e780e04ee280a04ae24e6149e0ca6046e01660e8e6cee08ee00ee089e01ee0e8e6caa08ae00a9089e01990e8e606a0a0e1056088e00090c6e500aec6e50e6c86e200eec6e5015085e2380055e3d2ffffba0060a0e3386088e53c6088e50e8c88e2386088e53c6088e50e8c88e2386088e53c6088e5014084e2380054e3bfffffbaf087bde8f04f2de90010a0e31c20a0e31c30a0e300b0a0e3074b80e20e5b80e20060a0e30070a0e3068387e08880a0e1f89090e1f8a094e1f8c095e102c04ce20a005ce10ca0a0c109a04ae002005ae301b08ba201005ae1020000da0a10a0e10720a0e10630a0e1017087e2380057e3ecffffba016086e2380056e3e8ffffba0100a0e10210a0e10320a0e10b30a0e1f08fbde8"
     },
     "trampoline": {
       "vaddr": "0x5389639c",
@@ -69,8 +69,8 @@
     },
     "embedded_tables": {
       "desc_table": {
-        "vaddr": "0x53001440",
-        "offset": "0x19168",
+        "vaddr": "0x53001600",
+        "offset": "0x19328",
         "length": 728
       },
       "mean_table": {
@@ -103,18 +103,18 @@
     "baseline": "Official Ricoh GR IV v1.20 baseline (China Mainland)",
     "stock_rom_bugfix": "Patched v1.20 DspService::LoadDsp (0x5398ef68 & 0x5398efac) to pass `sub r1, fp, #0x40` (DF_ID_S.BIN & DF_IP.BIN) with dual-drive polling ('C': SD card, 'I': Internal 53GB flash) and relaxed drive letter check (0x5398eedc) up to drive 15",
     "mmu_and_dsp_base": "CEVA-XM4 VLIW instructions require native 0x52100000 base. Swapped Pool[3] (DspFw) to 0x52100000 (4 MB) and Pool[8] (ImageAdjustWork) to 0x51200000 (15 MB), patched ChunkLoader (0x5398e178) & LoadDsp (0x5398ee9c) base checks to 0x5210, and patched boot vector parameter r1=0x52100000 into DspService::Start",
-    "zero_stock_fallback": "FdLibraryService::DetectFace (0x53866594, stock FotoNation LibAHFD) is completely bypassed; 100% of LCD AF subject boxes originate from CEVA-CV hardware CNN",
-    "hook1_boot_awakening": "LiveViewProcess3aContoller (0x53676ab8) -> Cave 1 (0x53000d60) zeroes STATUS_VA (0x52a80100..0x52a8011f) on singleton creation without blocking early-boot 3A init on SD I/O",
-    "hook2_continuous_ai_af": "FaceDetectionService::Task (0x5389639c) -> Cave 2 (0x53000e00) uses constructor-zeroed [r4, #0x13e] to initialize boot retry counter, polls SD card ('C') and internal memory ('I'), uses correct return check (bne cave2_load_ok for 1==SUCCESS), calls StartDsp(r1=0x52100000), then runs pure full-time CEVA-CV CNN inference",
-    "safe_ddr_zones": "All shared buffers relocated to verified unmanaged, fully-mapped DDR (0x52930000..0x53000000): Tensor In @ 0x52940000, Tensor Out @ 0x52949a00, Weights @ 0x52960000..0x52a76220, Msg @ 0x52a80000, Status @ 0x52a80100 - zero collision with RTOS Live View Pool[8]",
+    "hybrid_af_architecture": "Two-level hierarchical AF: Level 1 calls stock FotoNation LibAHFD::DetectFace (0x53866594) + GetResults (0x5386666c). When frontal faces/eyes detected (face_count > 0), resumes stock OSD/PDAF at 60fps. When face_count == 0, falls through to Level 2 CEVA-XM4 deep CNN for profile faces, pets (dogs/cats), birds and non-frontal subjects",
+    "hook1_boot_awakening": "LiveViewProcess3aContoller (0x53676ab8) -> Cave 1 (0x53000d60) zeroes STATUS_VA (0x52c00100..0x52c0011f) on singleton creation without blocking early-boot 3A init on SD I/O",
+    "hook2_continuous_ai_af": "FaceDetectionService::Task (0x5389639c) -> Cave 2 (0x53000e00) uses constructor-zeroed [r4, #0x13e] to initialize boot retry counter, polls SD card ('C') and internal memory ('I'), uses correct return check (bne cave2_load_ok for 1==SUCCESS), calls StartDsp(r1=0x52100000), then executes hybrid Level 1 FotoNation + Level 2 CEVA-XM4 CNN inference",
+    "safe_ddr_zones": "All shared buffers relocated to verified unmanaged, fully-mapped DDR (0x52930000..0x53000000): Weights @ 0x52960000..0x52a76220, Tensor In @ 0x52b00000, Tensor Out @ 0x52b09a00, Msg @ 0x52c00000, Status @ 0x52c00100 - zero collision with weights or RTOS Live View Pool[8]",
     "cold_start_lock": "Seeds [r4, #0x100..0x10c] = (rect_cx, rect_cy, box_size, box_size), [r4, #0x118]/[r4, #0x11c] = face_id, [r4, #0x13c] = 1, [r4, #0x121] = 0, [r4, #0x124] = 0 so SelectMainFace and EVENT 0x04070001 lock instantaneously on Frame 1 from any head pose",
     "frame_source": "Completed Ahip ring descriptor *(*(0x550813d0 + 0x434)) (fallback 0x424 / 0x1c / 0x14) dequeued by AhipService::WaitFrame + ARM D-Cache invalidate (0x5391801c) prior to CPU read",
-    "downsampler": "Aspect-ratio-aware ([r4, #0xfc] x [r4, #0xfe]) YUV420 -> 3-plane 56x56 (row stride 64) RGB tensor @ 0x52940000 with C0-continuous 2.0x backlit shadow recovery (Y < 48 -> 2x, 48..144 -> 72 + Y/2) + ARM D-Cache clean/barrier (0x5391808c)",
+    "downsampler": "Aspect-ratio-aware ([r4, #0xfc] x [r4, #0xfe]) YUV420 -> 3-plane 56x56 (row stride 64) RGB tensor @ 0x52b00000 with C0-continuous 2.0x backlit shadow recovery (Y < 48 -> 2x, 48..144 -> 72 + Y/2) + ARM D-Cache clean/barrier (0x5391808c)",
     "dsp_inference": "msg_id 4 via SendMessage (0x5398e478) & WaitMessage (0x5398e794, timeout 100 ms) with full K-3 III weights @ 0x52960000 (677,824 B) & 0x52a057c0 (461,408 B)",
-    "output_heatmap": "Head-priority (fg = max(Ch1, Ch2 - 2)) 3-channel 56x56 (row stride 64) int16_t segmentation map @ 0x52949a00 + D-Cache invalidate (0x5391801c)",
-    "confidence_threshold": "max_diff >= 2 and (area_cnt >= 2 or max_diff >= 4)",
+    "output_heatmap": "Head-priority (fg = max(Ch1, Ch2 - 2)) 3-channel 56x56 (row stride 64) int16_t segmentation map @ 0x52b09a00 + D-Cache invalidate (0x5391801c)",
+    "confidence_threshold": "max_diff >= 3 and area_cnt >= 2",
     "face_result_structure": "100-byte zeroed m_DetectedFaceResult [r4, #0x78] in aspect-ratio-scaled Q8 fixed-point with dynamic blob-area box sizing [0x2800..0x5c00]",
-    "af_tracking_target": "Native dispatch via UpdateFaceDetectionResult (0x538959f4); ZERO calls to 0x53866594 (LibAHFD)",
+    "af_tracking_target": "Native dispatch via UpdateFaceDetectionResult (0x538959f4); handles both Level 1 FotoNation results and Level 2 CEVA-XM4 CNN results seamlessly",
     "lcd_osd_rendering": "UpdateFaceDetectionResult (0x538959f4) renders green AI Face/Eye box on LCD and fires EVENT 0x04070001 to AF",
     "af_system": "GR4 165-point on-sensor PDAF (Zaf) locks onto detected subject centroid"
   }

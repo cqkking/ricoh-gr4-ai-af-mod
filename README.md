@@ -34,11 +34,11 @@ Socionext Milbeaut M10V Heterogeneous SoC
 ├────────────────────────────────────────────────────────────────────────┤
 │  CEVA-CV Vector AI DSP Co-Processor [0x41000000] (512-bit SIMD / VLIW) │
 │  ├── Physical MMU Window: 0x41000000 (8 MB Strong-Order Shared)       │
-│  ├── DF_EX.BIN   (0x51200000, 5,251,648 B) — CEVA-CV Core + 1.14MB CNN│
-│  │   ├── Chunk 0 (0x51200000, 4,112,384 B) — CEVA-CV Vector Math Core  │
-│  │   └── Chunk 1 (0x516c0000, 1,139,232 B) — K-3 III Deep CNN Weights │
-│  ├── DF_ID_S.BIN (0x515ec000,    65,536 B) — CNN Model Weights Table   │
-│  └── DF_IP.BIN   (0x515fc000,    16,384 B) — Reset & Boot Vectors      │
+│  ├── DF_EX.BIN   (0x52100000, 5,251,648 B) — CEVA-CV Core + 1.14MB CNN│
+│  │   ├── Chunk 0 (0x52100000, 4,112,384 B) — CEVA-CV Vector Math Core  │
+│  │   └── Chunk 1 (0x52960000, 1,139,232 B) — K-3 III Deep CNN Weights │
+│  ├── DF_ID_S.BIN (0x524ec000,    65,536 B) — CNN Model Weights Table   │
+│  └── DF_IP.BIN   (0x524fc000,    16,384 B) — Reset & Boot Vectors      │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,21 +79,21 @@ This matches the exact byte allocation reconstructed and validated against the P
 
 ### Stage 1: Payload Slicing & Chunk Formatting (`dsp_splitter.py`)
 - Slices K-3 III's `06_DSP.bin` and deep learning neural weights into the 3-file structure expected by GR4's `DspService::LoadDsp`:
-  - `DF_EX.BIN` (5,251,648 bytes): Chunk 0 (CEVA-CV core, 4,112,384 B) + Chunk 1 (1,139,232 B K-3 III CNN weights: 677,824 B backbone weights @ `0x516c0000` + 461,408 B head weights @ `0x517657c0`).
-  - `DF_ID_S.BIN` (65,536 bytes): 64 KB constant neural weights loaded to `0x515ec000`.
-  - `DF_IP.BIN` (16,384 bytes): 16 KB instruction reset entry vectors loaded to `0x515fc000`.
+  - `DF_EX.BIN` (5,251,648 bytes): Chunk 0 (CEVA-CV core, 4,112,384 B @ `0x52100000`) + Chunk 1 (1,139,232 B K-3 III CNN weights: 677,824 B backbone weights @ `0x52960000` + 461,408 B head weights @ `0x52a057c0`).
+  - `DF_ID_S.BIN` (65,536 bytes): 64 KB constant neural weights loaded to `0x524ec000`.
+  - `DF_IP.BIN` (16,384 bytes): 16 KB instruction reset entry vectors loaded to `0x524fc000`.
 - Passes 100% byte-perfect reconstruction test verified by [`verify_dsp_payload.py`](src/dsp_ai/verify_dsp_payload.py).
 
-### Stage 2: Autonomous Boot-Time Awakening (`k3_gr4_dsp_patcher.py`)
+### Stage 2: Autonomous Boot-Time Awakening (`k3_gr4_dsp_patcher.py`, Archived)
 - **Zero-UART Design**: Designed for consumer camera bodies without debug serial headers.
 - Installs a trampoline at `LiveViewProcess3aContoller` (`0x53676ab8` $\to$ `b #0x53000d60`).
 - Non-blocking early boot state zeroing without hanging on SD card I/O.
 - Calls `DspService::LoadDsp(m_dspService, 'C', 0, 0)` and `Start()`, verified 100% stable on real hardware.
 
-### Stage 3: True Hybrid AI Autofocus Pipeline & Memory Guard (`stage3_ai_patcher.py`, v1.2.1)
+### Stage 3: True Hybrid AI Autofocus Pipeline & Memory Guard (`stage3_ai_patcher.py`, v1.2.2)
 - **True Hybrid AF Architecture**:
-  - **Level 1 (FotoNation Hardware Acceleration)**: Stock `LibAHFD::DetectFace` (`0x53866594`) executes first on every frame. When human frontal faces or eyes are detected (`r0 == 0`), execution branches immediately to `0x53896460` (`ConvertResult`), delivering sub-pixel hardware Face + Left/Right Eye AF at 60 fps with zero latency.
-  - **Level 2 (CEVA-XM4 CNN Intelligent Fallback)**: When no frontal face is detected (turned head, 90° profile, distant/masked person, or dog/cat/bird), the CEVA-XM4 deep learning CNN automatically steps in as an intelligent fallback to identify the subject and guide AF tracking.
+  - **Level 1 (FotoNation Hardware Acceleration)**: Stock `LibAHFD::DetectFace` (`0x53866594`) executes first on every frame, followed by `GetResults` (`0x5386666c`). When frontal human faces/eyes are detected (`face_count > 0`), execution branches immediately to `0x538963ac` (resumes stock OSD/PDAF pipeline at 60 fps with zero latency).
+  - **Level 2 (CEVA-XM4 CNN Intelligent Fallback)**: When no frontal face is detected (`face_count == 0`), execution falls through to Level 2 where CEVA-XM4 deep learning CNN automatically steps in as an intelligent fallback to identify profile faces, turned heads, distant persons, cats, dogs, or birds and guide AF tracking.
 - **Zero-Collision DDR Memory Allocation**:
   - Relocated tensor working buffer `TENSOR_IN_VA` to **`0x52b00000`** (`0xbde40` = 777,792 B), situated safely >564 KB above Chunk 2 in unmanaged DDR space.
   - Preserved static CNN model weights at `MEAN_WEIGHTS_VA = 0x52960000` and `HEAD_WEIGHTS_VA = 0x52a057c0`, completely eliminating DMA memory overwrite and maintaining 100% backward compatibility with existing SD card files.
@@ -228,26 +228,35 @@ python src/dsp_ai/build_firmware.py
 Output:
 ```text
 ======================================================================
-Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder (v1.20 Baseline)
+Ricoh GR IV Hybrid AI Live View Tracking Firmware Rebuilder (v1.2.1)
+Baseline: Official Ricoh GR IV Firmware v1.20
 ======================================================================
-[*] Confirmed Stage 2 binary intact: fwdc248b_stage2_dsp_wake.bin (38,693,256 bytes)
 
 [Step 1/4] Verifying staged SD card DSP binaries...
+[1/3] Reading source 06_DSP.bin, 05_RTOS.bin, and generated binaries...
+[2/3] Validating DF_EX.BIN chunk parser conformity against 0x53965ff8...
+[3/3] Reconstructing DSP memory 0x52100000..0x52500000 & CNN Weights 0x52960000..0x52a76220...
 [+] PASS: 100% byte-perfect reconstruction verified across all 5,333,536 bytes.
+    - DF_EX.BIN Chunk 0 matches 06_DSP.bin[0x000000..0x3ec000] -> 0x52100000
+    - DF_EX.BIN Chunk 1 matches K-3 III CNN Weights (1,139,232 B) -> 0x52960000
+    - DF_ID_S.BIN       matches 06_DSP.bin[0x3ec000..0x3fc000] -> 0x524ec000
+    - DF_IP.BIN         matches 06_DSP.bin[0x3fc000..0x400000] -> 0x524fc000
+  [+] All 3 SD card binaries verified in output/sd_card
 
-[Step 2/4] Decoding official firmware container baseline...
-  -> Official payload decoded: 68,102,696 bytes
+[Step 2/4] Decoding official firmware container baseline: d:\Ricoh GR4 firmware Mod\firmware\official\v1.20\fwdc248b.bin...
+  -> Official v1.20 payload decoded: 69,632,740 bytes
 
 [Step 3/4] Splicing Stage 3 Dual Caves, Trampolines & AI Tables...
   [+] Hook 1 (Boot Wakeup): 84 B Cave @ VA 0x53000d60, Hook @ VA 0x53676ab8
-  [+] Hook 2 (Hybrid AI AF): 1568 B Cave @ VA 0x53000e00, Hook @ VA 0x5389639c
-  [+] Embedded Desc Table (728 B) @ VA 0x53001400
-  [+] Embedded Mean Table (9408 B) @ VA 0x541db540
-  [+] Embedded Std Table  (9408 B) @ VA 0x54217680
+  [+] Hook 2 (LiveView AI): 1604 B Cave @ VA 0x53000e00, Hook @ VA 0x5389639c
+  [+] Embedded Desc Table (728 B) @ VA 0x53001600
+  [+] Embedded Mean Table (9408 B) @ VA 0x54212890
+  [+] Embedded Std Table  (9408 B) @ VA 0x5424e9d0
 [*] Rezeroing 32-bit payload checksum word...
   [+] Payload word_sum == 0 validated successfully.
 
 [Step 4/4] Rebuilding flashable container with LZSS framing...
+  -> Modified payload bytes: 20461
   [+] Written Stage 3 preserved binary: output/fwdc248b_stage3_ai_track.bin (39,109,096 bytes)
   [+] Written active flashable binary:  output/fwdc248b.bin (39,109,096 bytes)
 
@@ -264,21 +273,24 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder (v1.20 Baseline)
 | `LiveViewProcess3aContoller` | `0x53676ab8` | Hook 1 entry for one-time boot status initialization (`b #0x53000d60`) |
 | Cave 1 (Boot Init) | `0x53000d60` | 84-byte non-blocking APCS frame reconstruction + status zeroing |
 | `FaceDetectionService::Task` | `0x5389639c` | Hook 2 site for continuous per-frame LiveView Hybrid AI AF (`b #0x53000e00`) |
-| Cave 2 (Hybrid AI AF) | `0x53000e00` | 1,568-byte execution engine (Native FotoNation + CEVA-XM4 CNN fallback) |
+| Cave 2 (Hybrid AI AF) | `0x53000e00` | 1,604-byte execution engine (Native FotoNation + CEVA-XM4 CNN fallback) |
+| Embedded Desc Table | `0x53001600` | 728-byte neural descriptor table relocated safely to `0x53001600` (444 B margin from Cave 2) |
 | Native `LibAHFD::DetectFace` | `0x53866594` | Camera-native FotoNation hardware face detection (called first on every frame) |
-| `ConvertResult` (Direct Jump) | `0x53896460` | Direct branch target when FotoNation detects frontal face/eyes (60 fps zero latency) |
+| `FdLibraryService::GetResults` | `0x5386666c` | Converts FotoNation detected faces and updates `[FdLibraryService, #0x30]` (`face_count`) |
+| Stock OSD/PDAF Resume | `0x538963ac` | Resume address after `face_count > 0` or AI detection (`UpdateFaceDetectionResult` @ 60 fps) |
 | Completed AHIP Ring | `*(*(0x55081350 + 0x424))` | Descriptor dequeued by `AhipService::WaitFrame` (`+0x04` Y, `+0x08` U, `+0x0c` V) |
 | `InvalidateDataCache` | `0x538f0454` | Invalidates CPU L1/L2 data cache before reading frame buffer |
 | `FlushDataCache` | `0x538f04c4` | Flushes CPU data cache after writing RGB tensor before DSP DMA |
 | `DspFactory::GetDspService()` | `0x5398d97c` | Retrieves CEVA-CV `DspService` singleton pointer |
 | `DspService::LoadDsp` | `0x5398ee0c` | Loads `DF_EX.BIN`, `DF_ID_S.BIN`, `DF_IP.BIN` from SD card root (Drive `C:\`) |
-| `DspService::Start` | `0x5398e2b0` | Deasserts DSP reset, starts execution at `0x515fc000` |
+| `DspService::Start` | `0x5398e2b0` | Deasserts DSP reset, starts execution at `0x52100000` |
 | `DspService::SendMessage` | `0x5398e45c` | Dispatches Message ID 4 (Inference request) |
 | `DspService::WaitMessage` | `0x5398e778` | Awaits tensor inference completion (timeout 100 ms) |
 | `m_DetectedFaceResult` | `[FaceDetectionService, #0x78]` | Array of 100-byte face structures (`x, y, w, h, eye1, eye2, mouth, score`) |
 | `FdLibraryService` | `[FaceDetectionService, #0x38]` | Subsystem holding detected face count @ `+0x30` |
 | `UpdateFaceDetectionResult` | `0x53895af4` | Submits face/eye coordinates to LCD OSD display task & AF engine |
 | `TENSOR_IN_VA` (`work_buf`) | `0x52b00000` | Relocated input tensor buffer (777,792 B), 0 byte collision with static weights |
+| `TENSOR_OUT_VA` | `0x52b09a00` | Heatmap output buffer (3-channel int16 56x56, stride 64) with D-Cache invalidate |
 | `MEAN_WEIGHTS_VA` | `0x52960000` | Chunk 1 static CNN backbone weights (677,824 B) |
 | `HEAD_WEIGHTS_VA` | `0x52a057c0` | Chunk 2 static CNN head classification weights (461,408 B) |
 
@@ -286,19 +298,24 @@ Ricoh GR IV Stage 3 AI Live View Tracking Firmware Rebuilder (v1.20 Baseline)
 
 ## 8. Release Changelog
 
-### v1.2.1 (Current Release)
+### v1.2.2 (Current Release)
+- **Deep Firmware Audit & Cave Boundary Hardening**:
+  - Relocated `Embedded Desc Table` from `0x53001440` to **`0x53001600`**, expanding Cave 2 safety headroom from 32 bytes to **444 clean zero bytes** (`0x53000e00 + 1604 B = 0x53001444 .. 0x53001600`), completely eliminating any risk of descriptor collision or literal pool corruption.
+- **Level 1 $\to$ Level 2 Hybrid Fallback Logic Hardening**:
+  - Resolved the `LibAHFD::DetectFace` return code short-circuit bug: `DetectFace` (`0x53866594`) returns `r0 == 0` on every normal frame (`AHFD_OK`), regardless of whether faces are present.
+  - Cave 2 now calls `FdLibraryService::GetResults` (`0x5386666c`) and explicitly tests converted `[FdLibraryService, #0x30]` (`face_count > 0`). Only when genuine frontal faces are detected does it branch to stock tracking; when `face_count == 0`, it deterministically falls through to Level 2 (CEVA-XM4 CNN).
+- **Binary Checksum**: `fwdc248b.bin` (39,109,096 bytes, SHA-256: `49ea52a5620c89a59f03cbd79e38bc70dda0a281bdc1dad59c0621d5e1ce8cbf`).
+
+### v1.2.1
 - **True Pentax K-3 III Hybrid AF Architecture**:
-  - Integrated native FotoNation `LibAHFD::DetectFace` (`0x53866594`) with CEVA-XM4 CNN deep learning fallback. Frontal faces/eyes trigger zero-latency 60fps hardware tracking via `0x53896460`; turned heads, profiles, masks, and animals trigger CEVA-XM4 deep learning CNN segmentation.
+  - Integrated native FotoNation `LibAHFD::DetectFace` (`0x53866594`) with CEVA-XM4 CNN deep learning fallback.
 - **Elimination of DDR Weight Clobber (`work_buf` Relocation)**:
   - Relocated `TENSOR_IN_VA` to `0x52b00000`, eliminating the 646 KB memory overlap that previously overwrote static model weights at `0x52960000`.
 - **Elimination of Fatal 2-Second Boot Hang in `DspService::Test`**:
-  - Removed infinite blocking call `tk_wai_flg(0x3f0000, 0)` from Cave 2, allowing clean DSP CRT0 initialization and yielding frame cleanly.
+  - Removed infinite blocking call `tk_wai_flg(0x3f0000, 0)` from Cave 2.
 - **Elimination of False Boot-Time Top-Left 1/4 Box**:
-  - Populates both `eye1` (`+0x10`) and `eye2` (`+0x20`) within the face bounding box; ensures `face_count = 0` on startup when no subject is present.
-- **Ahip Driver Base Correction**:
-  - Corrected `AHIP_DRV_BASE_VA` to `0x55081350` and primary ring offset to `+0x424` for v1.20 baseline.
-- **100% Backwards Compatibility**:
-  - SD card files (`DF_EX.BIN`, `DF_ID_S.BIN`, `DF_IP.BIN`) remain unchanged; only `fwdc248b.bin` requires flashing.
+  - Populates both `eye1` (`+0x10`) and `eye2` (`+0x20`) within the face bounding box.
+- **Ahip Driver Base Correction**: Corrected `AHIP_DRV_BASE_VA` to `0x55081350`.
 - **Binary Checksum**: `fwdc248b.bin` (39,109,096 bytes, SHA-256: `15bcb7fb254f6c42f5d50c33b6505f7887d422b0f6c1d65c70577363edf1d1c3`).
 
 ### v1.2.0
