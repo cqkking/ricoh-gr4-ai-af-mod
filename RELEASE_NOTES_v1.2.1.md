@@ -46,7 +46,6 @@ Version **v1.2.1** is a critical bugfix and architectural release for the Ricoh 
 | :--- | :--- | :--- | :--- |
 | **`output/fwdc248b.bin`** | 39,109,096 | `15bcb7fb254f6c42f5d50c33b6505f7887d422b0f6c1d65c70577363edf1d1c3` | Flashable v1.2.1 Firmware (Hybrid AF & DDR Fix) |
 | **`output/fwdc248b_stage3_ai_track.bin`** | 39,109,096 | `15bcb7fb254f6c42f5d50c33b6505f7887d422b0f6c1d65c70577363edf1d1c3` | Stage 3 Release Payload |
-| **`output/fwdc248b_stage2_dsp_wake.bin`** | 38,693,256 | `ed8c4e2414ffd66e270bb308a3d3c932a4de8300e57e6cc0fb1fc8f0fffd836e` | Stage 2 Firmware (Preserved) |
 | **`output/sd_card/DF_EX.BIN`** | 5,251,648 | `b16788a16a11ecc2c007d26888a56195b2b4e1bec8aa05b74ea6789803ae8d44` | CEVA-CV DSP Core + Full K-3 III CNN Weights (Unchanged) |
 | **`output/sd_card/DF_ID_S.BIN`** | 65,536 | `3d3ebf29622323bb4a203347feaf676aeac110a7b1181604270a1ae0c22b0a2a` | DSP Instruction DRAM Overlay (Unchanged) |
 | **`output/sd_card/DF_IP.BIN`** | 16,384 | `cf409a84f3f2d8fac1491634ecda882c9d76b3439c2423da1b31950463a52067` | DSP Parameter Overlay (Unchanged) |
@@ -58,7 +57,6 @@ Version **v1.2.1** is a critical bugfix and architectural release for the Ricoh 
 | Check | Specification | v1.2.1 Result | Status |
 | :--- | :--- | :--- | :--- |
 | **Firmware Baseline** | Official Ricoh GR IV v1.20 | `7563d7e462f0c53b6ab2fbab7cdfbbb57151a41192ee82f4f3a2108f9d77650d` | **PASS** |
-| **Stage 2 SHA-256** | `ed8c4e24...fffd836e` | Strict match verified | **PASS** |
 | **Cave 1 Bounds** | `0x53000d60 .. 0x53000db4` | 84 bytes | **PASS** |
 | **Cave 2 Bounds** | `0x53000e00 .. 0x53001420` | 1,568 bytes (<= 1,600 B) | **PASS** |
 | **DDR Non-Overlap** | All zones `0x51200000 .. 0x53000000` | 0 byte overlap verified | **PASS** |
