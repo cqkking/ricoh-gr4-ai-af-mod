@@ -217,40 +217,15 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe92d47f0) # push {r4, r5, r6, r7, r8, sb, sl, lr}
     insns.append(0xe24dd008) # sub  sp, sp, #8
 
-    # 2. Level 1 Hybrid AF: Execute stock LibAHFD face detection first!
-    #    r4 is FaceDetectionService*, [r4, #0x38] is FdLibraryService*
-    insns.append(0xe5940038) # ldr  r0, [r4, #0x38] (FdLibraryService*)
-    curr_pc = cave_va + len(insns) * 4
-    insns.append(encode_arm_branch(curr_pc, FD_LIB_DETECT_VA, is_bl=True)) # bl 0x53866594
-    insns.append(0xe3500000) # cmp  r0, #0
-    branch_to("run_ceva_cnn", is_bl=False, cond=0x1) # bne .run_ceva_cnn (if hardware error, fallback to CNN)
-
-    # DetectFace returned 0 (AHFD_OK / ERR_NONE). Parse results into m_DetectedFaceResult:
-    # Call FdLibraryService::GetResults(FdLibraryService* r0, m_DetectedFaceResult* r1)
-    insns.append(0xe5940038) # ldr  r0, [r4, #0x38] (FdLibraryService*)
-    insns.append(0xe5941078) # ldr  r1, [r4, #0x78] (m_DetectedFaceResult*)
-    insns.append(0xe3510000) # cmp  r1, #0
-    branch_to("run_ceva_cnn", is_bl=False, cond=0x0) # beq .run_ceva_cnn
-    curr_pc = cave_va + len(insns) * 4
-    insns.append(encode_arm_branch(curr_pc, FD_LIB_GET_RES_VA, is_bl=True)) # bl 0x5386666c
-
-    # GetResults wrote face_count to [FdLibraryService, #0x30]!
-    # Genuine frontal face found ONLY when face_count > 0:
-    insns.append(0xe5940038) # ldr  r0, [r4, #0x38] (FdLibraryService*)
-    insns.append(0xe5901030) # ldr  r1, [r0, #0x30] (face_count)
-    insns.append(0xe3510000) # cmp  r1, #0
-    branch_to("stock_face_found", is_bl=False, cond=0xc) # bgt .stock_face_found (face_count > 0: genuine frontal face detected!)
-
-    mark_label("run_ceva_cnn")
-
-    # 3. Call DspFactory::GetDspService() -> r0
+    # 2. Pure K-3 III Deep Learning Exclusive: Stock LibAHFD (0x53866594) is 100% disabled!
+    #    Call DspFactory::GetDspService() -> r0
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, GET_DSP_SVC_VA, is_bl=True))
 
-    # 4. m_dspService is at [r0, #4]
+    # 3. m_dspService is at [r0, #4]
     insns.append(0xe5905004) # ldr  r5, [r0, #4] (m_dspService)
     insns.append(0xe3550000) # cmp  r5, #0
-    branch_to("ai_done", is_bl=False, cond=0x0) # beq .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x0) # beq .clear_and_exit
 
     # 5. Check if DSP is already running (status Bit 2 = 0x4 STARTED!)
     insns.append(0xe5952004) # ldr  r2, [r5, #4]
@@ -274,11 +249,11 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe2822001) # add  r2, r2, #1
     insns.append(0xe5882004) # str  r2, [r8, #4]
     insns.append(0xe2523014) # subs r3, r2, #20
-    branch_to("ai_done", is_bl=False, cond=0x3) # blo .ai_done (wait first 20 frames)
+    branch_to("clear_and_exit", is_bl=False, cond=0x3) # blo .clear_and_exit (wait first 20 frames)
     insns.append(0xe3530d1e) # cmp  r3, #0x780 (1920 frames = 30 retries)
-    branch_to("ai_done", is_bl=False, cond=0x2) # bhs .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x2) # bhs .clear_and_exit
     insns.append(0xe313003f) # tst  r3, #0x3f  (retry on ticks 20, 84, 148, ...)
-    branch_to("ai_done", is_bl=False, cond=0x1) # bne .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x1) # bne .clear_and_exit
 
     # Unlock FaceDetectionService mutex (r4 + 0x48) BEFORE Storage/SD I/O
     insns.append(0xe2840048) # add  r0, r4, #0x48
@@ -310,13 +285,13 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     # Both C:\ and I:\ failed: clear false LOADED bit and return
     insns.append(0xe3a02000) # mov  r2, #0
     insns.append(0xe5852004) # str  r2, [r5, #4] (clear false LOADED bit)
-    # Re-lock FaceDetectionService mutex (r4 + 0x48) before returning to ai_done
+    # Re-lock FaceDetectionService mutex (r4 + 0x48) before returning to clear_and_exit
     insns.append(0xe2840048) # add  r0, r4, #0x48
     emit_ldr_imm32(insns, 3, MUTEX_COOKIE_VA)
     insns.append(0xe5931000) # ldr  r1, [r3]
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, LOCK_MUTEX_VA, is_bl=True))
-    branch_to("ai_done", is_bl=False, cond=0xe) # b .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0xe) # b .clear_and_exit
 
     mark_label("cave2_load_ok")
     # Start CEVA-CV DSP at native K-3 III base address 0x52100000!
@@ -339,10 +314,10 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     # Verify STARTED bit (0x4) is now set
     insns.append(0xe5952004) # ldr  r2, [r5, #4]
     insns.append(0xe3120004) # tst  r2, #4
-    branch_to("ai_done", is_bl=False, cond=0x0) # beq .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x0) # beq .clear_and_exit
 
     # Yield current frame to let CEVA DSP core complete boot sequence cleanly
-    branch_to("ai_done", is_bl=False, cond=0xe) # b .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0xe) # b .clear_and_exit
 
     mark_label("dsp_is_running")
 
@@ -383,10 +358,10 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe3520000) # cmp  r2, #0
     insns.append(0x05932014) # ldreq r2, [r3, #0x14]
     insns.append(0xe3520000) # cmp  r2, #0
-    branch_to("ai_done", is_bl=False, cond=0x0) # beq .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x0) # beq .clear_and_exit
     insns.append(0xe592600c) # ldr  r6, [r2, #0x0c] (Y_plane)
     insns.append(0xe3560000) # cmp  r6, #0
-    branch_to("ai_done", is_bl=False, cond=0x0) # beq .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x0) # beq .clear_and_exit
     insns.append(0xe5927010) # ldr  r7, [r2, #0x10] (U_plane)
     insns.append(0xe5928014) # ldr  r8, [r2, #0x14] (V_plane)
 
@@ -458,7 +433,7 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, SEND_MSG_VA, is_bl=True))
     insns.append(0xe3500000) # cmp  r0, #0
-    branch_to("ai_done", is_bl=False, cond=0x1) # bne .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x1) # bne .clear_and_exit
 
     # 13. Call DspService::WaitMessage(m_dspService, seq, timeout=100, &resp)
     insns.append(0xe1a00005) # mov  r0, r5 (svc)
@@ -468,7 +443,7 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, WAIT_MSG_VA, is_bl=True))
     insns.append(0xe3500000) # cmp  r0, #0
-    branch_to("ai_done", is_bl=False, cond=0x1) # bne .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x1) # bne .clear_and_exit
 
     # 14. Invalidate ARM D-Cache for output heatmap @ 0x52b09a00 (size 0x5400 = 3 * 0x1c00)
     curr_pc = cave_va + len(insns) * 4
@@ -484,10 +459,11 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
 
     # 16. Noise-immune detection gate:
     #     Require max_diff >= 3 (+0.75 logit) AND area_cnt >= 2
+    #     If conditions not met, route to heartbeat_box (diagnostic box in lower-right)
     insns.append(0xe3500003) # cmp  r0, #3
-    branch_to("ai_done", is_bl=False, cond=0xb) # blt .ai_done
+    branch_to("heartbeat_box", is_bl=False, cond=0xb) # blt .heartbeat_box
     insns.append(0xe3530002) # cmp  r3, #2
-    branch_to("ai_done", is_bl=False, cond=0xb) # blt .ai_done
+    branch_to("heartbeat_box", is_bl=False, cond=0xb) # blt .heartbeat_box
 
     mark_label("subject_detected")
     # --- K-3 III Deep Learning Subject Detected! ---
@@ -527,6 +503,23 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe05c60a5) # subs r6, ip, r5, lsr #1
     insns.append(0x43a06000) # movmi r6, #0 (top)
 
+    branch_to("populate_face_struct", is_bl=False, cond=0xe) # b .populate_face_struct
+
+    mark_label("heartbeat_box")
+    # Heartbeat diagnostic box in lower-right quadrant:
+    # left = 240 px (0x0f000 in Q8), top = 140 px (0x08c00 in Q8)
+    # box_size = 32 px (0x02000 in Q8, > 0x1e00 SelectMainFace threshold)
+    # score = 99
+    # cx = 256 px (0x10000 in Q8), cy = 156 px (0x09c00 in Q8)
+    emit_ldr_imm32(insns, 8, 0x0f000) # r8 = left (240 px in Q8)
+    emit_ldr_imm32(insns, 6, 0x08c00) # r6 = top  (140 px in Q8)
+    insns.append(0xe3a05b08)          # mov  r5, #0x2000 (box_size = 32 px = 0x2000)
+    insns.append(0xe3a09063)          # mov  sb, #99     (confidence = 99)
+    emit_ldr_imm32(insns, 7, 0x10000) # r7 = cx (256 px in Q8)
+    emit_ldr_imm32(insns, 12, 0x09c00) # ip = cy (156 px in Q8)
+    # falls through into populate_face_struct
+
+    mark_label("populate_face_struct")
     # Save telemetry @ STATUS_VA + 12 (0x52c0010c)
     emit_ldr_imm32(insns, 3, STATUS_VA + 12)
     insns.append(0xe5839000) # str  sb, [r3, #0]  (peak_score)
@@ -538,7 +531,7 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     # Fetch m_DetectedFaceResult pointer from [r4, #0x78]
     insns.append(0xe594a078) # ldr  sl, [r4, #0x78] (m_DetectedFaceResult)
     insns.append(0xe35a0000) # cmp  sl, #0
-    branch_to("ai_done", is_bl=False, cond=0x0) # beq .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x0) # beq .clear_and_exit
 
     # First zero all 100 bytes (25 words) of m_DetectedFaceResult[0] @ sl
     insns.append(0xe3a00000) # mov  r0, #0
@@ -611,23 +604,22 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     # Set detected face_count = 1 and main_face_idx = 0 in FdLibraryService ([r4, #0x38])
     insns.append(0xe5943038) # ldr  r3, [r4, #0x38] (FdLibraryService)
     insns.append(0xe3530000) # cmp  r3, #0
-    branch_to("ai_done", is_bl=False, cond=0x0) # beq .ai_done
+    branch_to("clear_and_exit", is_bl=False, cond=0x0) # beq .clear_and_exit
     insns.append(0xe3a01001) # mov  r1, #1
     insns.append(0xe5831030) # str  r1, [r3, #0x30] (face_count = 1)
     insns.append(0xe3a01000) # mov  r1, #0
     insns.append(0xe5831034) # str  r1, [r3, #0x34] (main_face_idx = 0)
+    branch_to("ai_done", is_bl=False, cond=0xe) # b .ai_done
+
+    mark_label("clear_and_exit")
+    # Clear detected face_count = 0 in FdLibraryService ([r4, #0x38])
+    insns.append(0xe5943038) # ldr  r3, [r4, #0x38] (FdLibraryService)
+    insns.append(0xe3530000) # cmp  r3, #0
+    insns.append(0x13a01000) # movne r1, #0
+    insns.append(0x15831030) # strne r1, [r3, #0x30] (face_count = 0)
+    # falls through to ai_done
 
     mark_label("ai_done")
-    # Restore stack and resume at HOOK2_AI_RESUME_VA (0x538963ac):
-    # Unlocks mutex r6 and calls UpdateFaceDetectionResult(r4) (0x538959f4)
-    insns.append(0xe28dd008) # add  sp, sp, #8
-    insns.append(0xe8bd47f0) # pop  {r4, r5, r6, r7, r8, sb, sl, lr}
-    insns.append(0xe8bd000f) # pop  {r0, r1, r2, r3}
-    curr_pc = cave_va + len(insns) * 4
-    insns.append(encode_arm_branch(curr_pc, HOOK2_AI_RESUME_VA, is_bl=False))
-
-    mark_label("stock_face_found")
-    # Stock LibAHFD detected frontal face(s) and GetResults already converted them into [r4, #0x78]!
     # Restore stack and resume at HOOK2_AI_RESUME_VA (0x538963ac):
     # Unlocks mutex r6 and calls UpdateFaceDetectionResult(r4) (0x538959f4)
     insns.append(0xe28dd008) # add  sp, sp, #8

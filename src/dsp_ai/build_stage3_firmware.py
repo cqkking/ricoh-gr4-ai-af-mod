@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-build_stage3_firmware.py - Pack Verified Stage 3 Dual-Hook AI Live View Tracking Firmware (v1.2.0)
+build_stage3_firmware.py - Pack Verified Pure K-3 III Deep Learning Exclusive AF Firmware (v1.2.3)
 
 Rebased onto official Ricoh GR IV v1.20 baseline firmware.
+Stock FotoNation Level 1 AF bypassed 100% in Cave 2 with lower-right Heartbeat Box diagnostic.
 
 Builds:
   1. Preserved Stage 3 Firmware: output/fwdc248b_stage3_ai_track.bin
@@ -137,8 +138,8 @@ def build_stage3_release():
 
     # Save release manifest
     manifest = {
-        "release_type": "Hybrid AF Architecture & Zero-Collision Memory (v1.2.2)",
-        "version": "1.2.2",
+        "release_type": "Pure K-3 III Deep Learning Exclusive AF with Heartbeat Box (v1.2.3)",
+        "version": "1.2.3",
         "baseline_firmware": "Official Ricoh GR IV Firmware v1.20",
         "official_fw_sha256": sha256_hex(raw_fw),
         "firmware": {
@@ -152,9 +153,10 @@ def build_stage3_release():
             "baseline": "Official Ricoh GR IV v1.20 baseline (China Mainland)",
             "stock_rom_bugfix": "Patched v1.20 DspService::LoadDsp (0x5398ef68 & 0x5398efac) to pass `sub r1, fp, #0x40` (DF_ID_S.BIN & DF_IP.BIN) with dual-drive polling ('C': SD card, 'I': Internal 53GB flash) and relaxed drive letter check (0x5398eedc) up to drive 15",
             "mmu_and_dsp_base": "CEVA-XM4 VLIW instructions require native 0x52100000 base. Swapped Pool[3] (DspFw) to 0x52100000 (4 MB) and Pool[8] (ImageAdjustWork) to 0x51200000 (15 MB), patched ChunkLoader (0x5398e178) & LoadDsp (0x5398ee9c) base checks to 0x5210, and patched boot vector parameter r1=0x52100000 into DspService::Start",
-            "hybrid_af_architecture": "Two-level hierarchical AF: Level 1 calls stock FotoNation LibAHFD::DetectFace (0x53866594) + GetResults (0x5386666c). When frontal faces/eyes detected (face_count > 0), resumes stock OSD/PDAF at 60fps. When face_count == 0, falls through to Level 2 CEVA-XM4 deep CNN for profile faces, pets (dogs/cats), birds and non-frontal subjects",
+            "af_architecture": "Pure K-3 III Deep Learning Exclusive (Stock FotoNation 100% Disabled): Cave 2 directly invokes CEVA-XM4 DSP pipeline. Eliminates all ambiguity between stock FotoNation tracking and CEVA-CV neural inference.",
+            "heartbeat_box_diagnostic": "When WaitMessage succeeds but no foreground subject is detected (blank wall), a fixed 32x32 diagnostic heartbeat box (left=240, top=140, score=99) is injected at the lower-right quadrant, providing unmistakable proof of DSP boot, AHIP dequeue, IPC round-trip, and OSD rendering. When a subject is detected, the dynamic AI bounding box overrides the heartbeat box.",
             "hook1_boot_awakening": "LiveViewProcess3aContoller (0x53676ab8) -> Cave 1 (0x53000d60) zeroes STATUS_VA (0x52c00100..0x52c0011f) on singleton creation without blocking early-boot 3A init on SD I/O",
-            "hook2_continuous_ai_af": "FaceDetectionService::Task (0x5389639c) -> Cave 2 (0x53000e00) uses constructor-zeroed [r4, #0x13e] to initialize boot retry counter, polls SD card ('C') and internal memory ('I'), uses correct return check (bne cave2_load_ok for 1==SUCCESS), calls StartDsp(r1=0x52100000), then executes hybrid Level 1 FotoNation + Level 2 CEVA-XM4 CNN inference",
+            "hook2_continuous_ai_af": "FaceDetectionService::Task (0x5389639c) -> Cave 2 (0x53000e00) uses constructor-zeroed [r4, #0x13e] to initialize boot retry counter, polls SD card ('C') and internal memory ('I'), uses correct return check (bne cave2_load_ok for 1==SUCCESS), calls StartDsp(r1=0x52100000), then executes pure K-3 III CEVA-XM4 CNN inference",
             "safe_ddr_zones": "All shared buffers relocated to verified unmanaged, fully-mapped DDR (0x52930000..0x53000000): Weights @ 0x52960000..0x52a76220, Tensor In @ 0x52b00000, Tensor Out @ 0x52b09a00, Msg @ 0x52c00000, Status @ 0x52c00100 - zero collision with weights or RTOS Live View Pool[8]",
             "cold_start_lock": "Seeds [r4, #0x100..0x10c] = (rect_cx, rect_cy, box_size, box_size), [r4, #0x118]/[r4, #0x11c] = face_id, [r4, #0x13c] = 1, [r4, #0x121] = 0, [r4, #0x124] = 0 so SelectMainFace and EVENT 0x04070001 lock instantaneously on Frame 1 from any head pose",
             "frame_source": "Completed Ahip ring descriptor *(*(0x550813d0 + 0x434)) (fallback 0x424 / 0x1c / 0x14) dequeued by AhipService::WaitFrame + ARM D-Cache invalidate (0x5391801c) prior to CPU read",
@@ -163,7 +165,7 @@ def build_stage3_release():
             "output_heatmap": "Head-priority (fg = max(Ch1, Ch2 - 2)) 3-channel 56x56 (row stride 64) int16_t segmentation map @ 0x52b09a00 + D-Cache invalidate (0x5391801c)",
             "confidence_threshold": "max_diff >= 3 and area_cnt >= 2",
             "face_result_structure": "100-byte zeroed m_DetectedFaceResult [r4, #0x78] in aspect-ratio-scaled Q8 fixed-point with dynamic blob-area box sizing [0x2800..0x5c00]",
-            "af_tracking_target": "Native dispatch via UpdateFaceDetectionResult (0x538959f4); handles both Level 1 FotoNation results and Level 2 CEVA-XM4 CNN results seamlessly",
+            "af_tracking_target": "Native dispatch via UpdateFaceDetectionResult (0x538959f4); directly populates m_DetectedFaceResult and updates FdLibraryService state",
             "lcd_osd_rendering": "UpdateFaceDetectionResult (0x538959f4) renders green AI Face/Eye box on LCD and fires EVENT 0x04070001 to AF",
             "af_system": "GR4 165-point on-sensor PDAF (Zaf) locks onto detected subject centroid"
         }
@@ -202,7 +204,7 @@ def build_stage3_release():
         print(f"    0x{ins.address:08x}: {ins.mnemonic:8s} {ins.op_str}")
 
     print("\n" + "=" * 70)
-    print("SUCCESS: Stage 3 Dual-Hook AI Live View Tracking Firmware (v1.2.0) Built & Verified!")
+    print("SUCCESS: Stage 3 Pure K-3 III Deep Learning Exclusive AF (v1.2.3) Built & Verified!")
     print("=" * 70)
 
 if __name__ == "__main__":
