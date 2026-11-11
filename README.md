@@ -4,9 +4,9 @@
 
 [![Platform: Socionext Milbeaut M10V](https://img.shields.io/badge/Platform-Socionext%20Milbeaut%20M10V-007acc.svg)](#)
 [![Target: Ricoh GR IV v1.20](https://img.shields.io/badge/Target%20Firmware-v1.20%20fwdc248b.bin-green.svg)](#)
-[![Version: v1.2.3](https://img.shields.io/badge/Version-v1.2.3-blue.svg)](#)
+[![Version: v1.2.4](https://img.shields.io/badge/Version-v1.2.4-blue.svg)](#)
 [![Architecture: ARM Cortex-A7 + CEVA-CV DSP](https://img.shields.io/badge/Architecture-ARMv7%20%2B%20CEVA--CV%20DSP-orange.svg)](#)
-[![Status: Pure K-3 III Deep Learning Exclusive AF (Dual WordSum=0)](https://img.shields.io/badge/Status-Pure%20K--3%20III%20DL%20Exclusive%20AF%20(Dual%20WordSum%3D0)-brightgreen.svg)](#)
+[![Status: Pure K-3 III Deep Learning Exclusive AF (Dual WordSum=0)](https://img.shields.io/badge/Status-Pure%20K--3%20III%20DL%20Exclusive%20AF%20(v1.2.4)-brightgreen.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#)
 
 Unofficial firmware modification for the **Ricoh GR IV (GR4)** digital camera that unlocks the dormant on-die **CEVA-CV vector AI DSP co-processor** (`0x41000000`) and unites camera-native **FotoNation 60 fps hardware Face/Eye tracking** with **Pentax K-3 Mark III's deep learning subject recognition neural network** directly into Ricoh's native 165-point on-sensor Phase Detection Autofocus (PDAF) system.
@@ -191,7 +191,9 @@ SD Card Root (C:\)
 │   ├── FEAT_DSP_STAGE3_AI_TRACK.md  # Detailed AI-AF technical whitepaper
 │   ├── FEAT_K3_AF_PORT.md           # Pentax K-3 III to GR4 AF porting audit
 │   ├── RELEASE_NOTES_v1.2.0.md      # v1.2.0 release notes
-│   └── RELEASE_NOTES_v1.2.1.md      # v1.2.1 release notes
+│   ├── RELEASE_NOTES_v1.2.1.md      # v1.2.1 release notes
+│   ├── RELEASE_NOTES_v1.2.3.md      # v1.2.3 release notes
+│   └── RELEASE_NOTES_v1.2.4.md      # v1.2.4 release notes
 ├── src/
 │   └── dsp_ai/
 │       ├── build_firmware.py        # Master firmware packager & container rebuilder
@@ -298,7 +300,22 @@ Baseline: Official Ricoh GR IV Firmware v1.20
 
 ## 8. Release Changelog
 
-### v1.2.2 (Current Release)
+### v1.2.4 (Current Release)
+- **On-Demand `DspService` Instantiation (Root Cause Fix)**:
+  - Discovered that Ricoh commercial firmware omits DSP partition initialization, leaving `[0x553a3164]` permanently NULL (`0`). In Cave 2, instruction 4 tested `m_dspService == 0` and unconditionally jumped to `clear_and_exit` on frame 1 to infinity!
+  - Cave 2 now dynamically calls `DspFactory::CreateDspService(this, 0)` (`0x5398d8fc`) on frame 1, instantiating `DspService`, constructing `DspMtx`, `DspSF`, `DspReq`, `DspExc`, and mounting queues.
+- **Persistent Dual-Box Visual Telemetry**:
+  - **Top-Left Box (`x=40, y=40, score=88`)**: Persistent indicator signaling that `DspService` is alive, but `LoadDsp` failed to read `DF_*.BIN` from SD card or internal flash (prompts user to check FAT32 formatting and root directory placement).
+  - **Lower-Right Heartbeat Box (`x=240, y=140, score=99`)**: Confirms DSP loaded, AHIP frames dequeue, and IPC `WaitMessage` succeeds.
+  - **Dynamic AI Tracking Box**: Neural network detects human faces, cat faces, dog faces, and profile poses.
+- **Binary Checksum**: `fwdc248b.bin` (39,109,096 bytes, SHA-256: `3bfb04641408c8da788665719528572b6ce78a2486ae6f948c23ff47dc139c1a`).
+
+### v1.2.3
+- **Pure K-3 III Deep Learning Exclusive AF (FotoNation Bypass)**:
+  - Bypassed stock `LibAHFD::DetectFace` (`0x53866594`) to eliminate false-positive confusion.
+  - Added diagnostic lower-right heartbeat box.
+
+### v1.2.2
 - **Deep Firmware Audit & Cave Boundary Hardening**:
   - Relocated `Embedded Desc Table` from `0x53001440` to **`0x53001600`**, expanding Cave 2 safety headroom from 32 bytes to **444 clean zero bytes** (`0x53000e00 + 1604 B = 0x53001444 .. 0x53001600`), completely eliminating any risk of descriptor collision or literal pool corruption.
 - **Level 1 $\to$ Level 2 Hybrid Fallback Logic Hardening**:

@@ -58,7 +58,8 @@ TENSOR_MSG_VA          = 0x52c00000 # 40-byte (0x28 B) DspCommandParameter buffe
 STATUS_VA              = 0x52c00100 # Telemetry & one-shot wakeup guard in DSP shared DRAM (outside work_buf!)
 
 # Firmware Services & Entry Points in v1.20
-GET_DSP_SVC_VA         = 0x5398d97c # DspFactory::GetDspService() -> singleton struct @ 0x553a3160
+GET_DSP_SVC_VA         = 0x5398d97c # DspFactory::GetInstance() -> singleton struct @ 0x553a3160
+CREATE_DSP_SVC_VA      = 0x5398d8fc # DspFactory::CreateDspService(this, 0) -> instantiates DspService @ [0x553a3164]
 LOAD_DSP_VA            = 0x5398ee2c # DspService::LoadDsp(svc, 'C', 0, 0)
 START_DSP_VA           = 0x5398e2cc # DspService::Start(svc, boot_addr=0x52100000, 0)
 TEST_DSP_VA            = 0x5398efd0 # DspService::Test(svc, 0) - DO NOT CALL: factory diagnostic loopback that hangs in tk_wai_flg(0x3f0000)
@@ -218,14 +219,29 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe24dd008) # sub  sp, sp, #8
 
     # 2. Pure K-3 III Deep Learning Exclusive: Stock LibAHFD (0x53866594) is 100% disabled!
-    #    Call DspFactory::GetDspService() -> r0
+    #    Call DspFactory::GetInstance() -> r0 (0x553a3160)
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, GET_DSP_SVC_VA, is_bl=True))
 
-    # 3. m_dspService is at [r0, #4]
+    # 3. Check if m_dspService at [r0, #4] is already instantiated
     insns.append(0xe5905004) # ldr  r5, [r0, #4] (m_dspService)
     insns.append(0xe3550000) # cmp  r5, #0
-    branch_to("clear_and_exit", is_bl=False, cond=0x0) # beq .clear_and_exit
+    branch_to("dsp_service_ready", is_bl=False, cond=0x1) # bne .dsp_service_ready
+
+    # If NULL, instantiate DspService via DspFactory::CreateDspService(this, 0) (0x5398d8fc)!
+    # Ricoh commercial firmware never calls CreateDspService at boot, leaving [0x553a3164] = 0.
+    # We call CreateDspService here on frame 1 to allocate DspService and create DspMtx/DspSF/DspReq/DspExc.
+    insns.append(0xe3a01000) # mov  r1, #0
+    curr_pc = cave_va + len(insns) * 4
+    insns.append(encode_arm_branch(curr_pc, CREATE_DSP_SVC_VA, is_bl=True))
+
+    # Reload m_dspService from [0x553a3164]
+    emit_ldr_imm32(insns, 0, 0x553a3160)
+    insns.append(0xe5905004) # ldr  r5, [r0, #4] (m_dspService)
+    insns.append(0xe3550000) # cmp  r5, #0
+    branch_to("clear_and_exit", is_bl=False, cond=0x0) # beq .clear_and_exit (safety check if malloc failed)
+
+    mark_label("dsp_service_ready")
 
     # 5. Check if DSP is already running (status Bit 2 = 0x4 STARTED!)
     insns.append(0xe5952004) # ldr  r2, [r5, #4]
@@ -251,9 +267,9 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe2523014) # subs r3, r2, #20
     branch_to("clear_and_exit", is_bl=False, cond=0x3) # blo .clear_and_exit (wait first 20 frames)
     insns.append(0xe3530d1e) # cmp  r3, #0x780 (1920 frames = 30 retries)
-    branch_to("clear_and_exit", is_bl=False, cond=0x2) # bhs .clear_and_exit
+    branch_to("sd_error_box", is_bl=False, cond=0x2) # bhs .sd_error_box (retries exhausted, keep error box visible)
     insns.append(0xe313003f) # tst  r3, #0x3f  (retry on ticks 20, 84, 148, ...)
-    branch_to("clear_and_exit", is_bl=False, cond=0x1) # bne .clear_and_exit
+    branch_to("sd_error_box", is_bl=False, cond=0x1) # bne .sd_error_box (between retries, keep error box visible!)
 
     # Unlock FaceDetectionService mutex (r4 + 0x48) BEFORE Storage/SD I/O
     insns.append(0xe2840048) # add  r0, r4, #0x48
@@ -285,13 +301,13 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     # Both C:\ and I:\ failed: clear false LOADED bit and return
     insns.append(0xe3a02000) # mov  r2, #0
     insns.append(0xe5852004) # str  r2, [r5, #4] (clear false LOADED bit)
-    # Re-lock FaceDetectionService mutex (r4 + 0x48) before returning to clear_and_exit
+    # Re-lock FaceDetectionService mutex (r4 + 0x48) before returning
     insns.append(0xe2840048) # add  r0, r4, #0x48
     emit_ldr_imm32(insns, 3, MUTEX_COOKIE_VA)
     insns.append(0xe5931000) # ldr  r1, [r3]
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, LOCK_MUTEX_VA, is_bl=True))
-    branch_to("clear_and_exit", is_bl=False, cond=0xe) # b .clear_and_exit
+    branch_to("sd_error_box", is_bl=False, cond=0xe) # b .sd_error_box
 
     mark_label("cave2_load_ok")
     # Start CEVA-CV DSP at native K-3 III base address 0x52100000!
@@ -503,6 +519,19 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe05c60a5) # subs r6, ip, r5, lsr #1
     insns.append(0x43a06000) # movmi r6, #0 (top)
 
+    branch_to("populate_face_struct", is_bl=False, cond=0xe) # b .populate_face_struct
+
+    mark_label("sd_error_box")
+    # Top-left diagnostic box: indicates DspService created but LoadDsp failed on SD card
+    # left = 40 px (0x02800 in Q8), top = 40 px (0x02800 in Q8)
+    # box_size = 32 px (0x02000 in Q8), score = 88
+    # cx = 56 px (0x03800 in Q8), cy = 56 px (0x03800 in Q8)
+    emit_ldr_imm32(insns, 8, 0x02800) # r8 = left (40 px in Q8)
+    emit_ldr_imm32(insns, 6, 0x02800) # r6 = top  (40 px in Q8)
+    insns.append(0xe3a05b08)          # mov  r5, #0x2000 (box_size = 32 px = 0x2000)
+    insns.append(0xe3a09058)          # mov  sb, #88     (confidence = 88)
+    emit_ldr_imm32(insns, 7, 0x03800) # r7 = cx (56 px in Q8)
+    emit_ldr_imm32(insns, 12, 0x03800) # ip = cy (56 px in Q8)
     branch_to("populate_face_struct", is_bl=False, cond=0xe) # b .populate_face_struct
 
     mark_label("heartbeat_box")

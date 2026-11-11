@@ -4,9 +4,9 @@
 
 [![平台: Socionext Milbeaut M10V](https://img.shields.io/badge/平台-Socionext%20Milbeaut%20M10V-007acc.svg)](#)
 [![适配固件: Ricoh GR IV v1.20](https://img.shields.io/badge/目标固件-v1.20%20fwdc248b.bin-green.svg)](#)
-[![版本: v1.2.3](https://img.shields.io/badge/版本-v1.2.3-blue.svg)](#)
+[![版本: v1.2.4](https://img.shields.io/badge/版本-v1.2.4-blue.svg)](#)
 [![架构: ARM Cortex-A7 + CEVA-CV DSP](https://img.shields.io/badge/芯片架构-ARMv7%20%2B%20CEVA--CV%20DSP-orange.svg)](#)
-[![状态: 纯 K-3 III 深度学习独占验证通过](https://img.shields.io/badge/验证状态-纯%20K--3%20III%20深度学习独占%20%26%20心跳框诊断%20(双重累加和%3D0)-brightgreen.svg)](#)
+[![状态: 纯 K-3 III 深度学习独占验证通过](https://img.shields.io/badge/验证状态-纯%20K--3%20III%20深度学习独占%20%26%20双框遥测诊断%20(v1.2.4)-brightgreen.svg)](#)
 [![开源协议: MIT](https://img.shields.io/badge/协议-MIT-blue.svg)](#)
 
 本项目是针对 **理光 GR IV (GR4)** 数码相机的非官方底层固件扩展补丁。它通过破译芯片内存映射与二进制驱动协议，成功激活了片上完全闲置的 **CEVA-CV 矢量 AI DSP 硬件协处理器**（物理基地址 `0x41000000`），构建了**相机原生 FotoNation 60 fps 硬件人脸/人眼极速跟踪**与**宾得旗舰单反 Pentax K-3 Mark III 深度学习主体识别卷积神经网络**相融合的真·混合自动对焦（Hybrid AF）系统，并直连挂接进 GR4 原生的 165 点片上相位差检测自动对焦（PDAF）管线。
@@ -244,7 +244,25 @@ python src/dsp_ai/build_firmware.py
 
 ## 8. 版本更新履历
 
-### v1.2.1 (当前最新版本)
+### v1.2.4 (当前最新版本)
+- **`DspService` 按需动态实例化（根因彻底修复）**：
+  - 审计发现理光商业固件在系统开机时完全剔除了对 DSP 分区的启动调用，从未调用 `CreateDspService` (`0x5398d8fc`)，导致 `m_dspService` 单例成员 `[0x553a3164]` 恒为 NULL (0)。在此前的 Cave 2 中，第 4 条指令检查 `r5 == 0` 时从第 1 帧开始直到关机全部无条件跳转至 `clear_and_exit`，导致重试计数器与诊断心跳框从未执行！
+  - Cave 2 现已加入动态按需创建机制：若检测到 `[0x553a3164] == 0`，立即在第 1 帧动态调用 `DspFactory::CreateDspService(this, 0)` (`0x5398d8fc`)，自动完成 0x60 堆内存分配、构造函数执行与跨核 RTOS 通信原语（`DspMtx`、`DspSF`、`DspReq`、`DspExc`）的初始化与挂载。
+- **双框常驻视觉遥测矩阵（Visual Telemetry）**：
+  - **左上角绿色警告框 (`x=40, y=40, score=88`)**：若 `DspService` 实例化成功，但 `LoadDsp` 尝试从 SD 卡与内置闪存读取 `DF_*.BIN` 均失败，该框将持续常驻显示，提示用户检查 SD 卡是否为 FAT32 格式以及文件是否放置在根目录。
+  - **右下角绿色心跳框 (`x=240, y=140, score=99`)**：在 CEVA DSP 启动、AHIP 正常出帧、跨核 IPC 往返 100% 成功且画面未检测到目标（大白墙）时常驻显示，证明底层驱动链路彻底跑通。
+  - **动态 AI 对焦框**：画面中出现人脸、侧脸或猫狗宠物时，自动锁定并驱动 PDAF。
+- **固件校验码**：`fwdc248b.bin`（39,109,096 字节，SHA-256：`3bfb04641408c8da788665719528572b6ce78a2486ae6f948c23ff47dc139c1a`）。
+
+### v1.2.3
+- **纯 K-3 III 深度学习独占验证版（物理旁路 FotoNation）**：
+  - 100% 切断原厂 `LibAHFD::DetectFace` (`0x53866594`) 调用，引入右下角诊断心跳框。
+
+### v1.2.2
+- **底层安全裕量加固**：
+  - 将 `Embedded Desc Table` 迁移至 `0x53001600`，彻底杜绝与 Cave 2 的内存重叠风险。
+
+### v1.2.1
 - **真·混合自动对焦架构（Hybrid AF）**：
   - 完美结合原厂 FotoNation `LibAHFD::DetectFace` (`0x53866594`) 与 CEVA-XM4 深度学习 CNN 智能托底。正面人脸/人眼通过 `0x53896460` 实现 60fps 硬件级零延迟对焦；侧脸、转头、口罩及宠物鸟类由深度学习网络接管。
 - **内存零冲突重构（DDR Weight Clobber Fix）**：

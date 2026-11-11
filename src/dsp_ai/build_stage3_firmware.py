@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-build_stage3_firmware.py - Pack Verified Pure K-3 III Deep Learning Exclusive AF Firmware (v1.2.3)
+build_stage3_firmware.py - Pack Verified Pure K-3 III Deep Learning Exclusive AF Firmware (v1.2.4)
 
 Rebased onto official Ricoh GR IV v1.20 baseline firmware.
-Stock FotoNation Level 1 AF bypassed 100% in Cave 2 with lower-right Heartbeat Box diagnostic.
+Stock FotoNation Level 1 AF bypassed 100% in Cave 2.
+Features on-demand DspService instantiation and dual-box visual telemetry diagnostics.
 
 Builds:
   1. Preserved Stage 3 Firmware: output/fwdc248b_stage3_ai_track.bin
@@ -69,7 +70,7 @@ def v2p(vaddr: int) -> int:
 
 def build_stage3_release():
     print("=" * 70)
-    print("Ricoh GR IV Hybrid AI Live View Tracking Firmware Rebuilder (v1.2.1)")
+    print("Ricoh GR IV Hybrid AI Live View Tracking Firmware Rebuilder (v1.2.4)")
     print("Baseline: Official Ricoh GR IV Firmware v1.20")
     print("=" * 70)
 
@@ -138,8 +139,8 @@ def build_stage3_release():
 
     # Save release manifest
     manifest = {
-        "release_type": "Pure K-3 III Deep Learning Exclusive AF with Heartbeat Box (v1.2.3)",
-        "version": "1.2.3",
+        "release_type": "Pure K-3 III Deep Learning Exclusive AF with On-Demand DspService & Dual Diagnostics (v1.2.4)",
+        "version": "1.2.4",
         "baseline_firmware": "Official Ricoh GR IV Firmware v1.20",
         "official_fw_sha256": sha256_hex(raw_fw),
         "firmware": {
@@ -151,10 +152,11 @@ def build_stage3_release():
         "patch_manifest": patch_manifest,
         "runtime_pipeline": {
             "baseline": "Official Ricoh GR IV v1.20 baseline (China Mainland)",
+            "dsp_service_lifecycle": "Ricoh commercial firmware never invokes DspFactory::CreateDspService (0x5398d8fc) at boot, leaving singleton member [0x553a3164] permanently NULL. Cave 2 detects m_dspService == NULL on Frame 1 and dynamically invokes CreateDspService(this, 0) (0x5398d8fc), instantiating DspService, creating RTOS primitives (DspMtx, DspSF, DspReq, DspExc), and mounting queues before proceeding to DSP loading.",
             "stock_rom_bugfix": "Patched v1.20 DspService::LoadDsp (0x5398ef68 & 0x5398efac) to pass `sub r1, fp, #0x40` (DF_ID_S.BIN & DF_IP.BIN) with dual-drive polling ('C': SD card, 'I': Internal 53GB flash) and relaxed drive letter check (0x5398eedc) up to drive 15",
             "mmu_and_dsp_base": "CEVA-XM4 VLIW instructions require native 0x52100000 base. Swapped Pool[3] (DspFw) to 0x52100000 (4 MB) and Pool[8] (ImageAdjustWork) to 0x51200000 (15 MB), patched ChunkLoader (0x5398e178) & LoadDsp (0x5398ee9c) base checks to 0x5210, and patched boot vector parameter r1=0x52100000 into DspService::Start",
             "af_architecture": "Pure K-3 III Deep Learning Exclusive (Stock FotoNation 100% Disabled): Cave 2 directly invokes CEVA-XM4 DSP pipeline. Eliminates all ambiguity between stock FotoNation tracking and CEVA-CV neural inference.",
-            "heartbeat_box_diagnostic": "When WaitMessage succeeds but no foreground subject is detected (blank wall), a fixed 32x32 diagnostic heartbeat box (left=240, top=140, score=99) is injected at the lower-right quadrant, providing unmistakable proof of DSP boot, AHIP dequeue, IPC round-trip, and OSD rendering. When a subject is detected, the dynamic AI bounding box overrides the heartbeat box.",
+            "dual_box_diagnostics": "Dual visual telemetry: (1) Top-Left Box (x=40, y=40, 32x32, score=88): Triggers if DspService is instantiated but LoadDsp fails on SD card. (2) Lower-Right Heartbeat Box (x=240, y=140, 32x32, score=99): Triggers when DSP boots, AHIP frames dequeue, and IPC WaitMessage succeeds, but no subject is detected in current frame. (3) Dynamic Green Box: Subject detected by neural network and tracked by PDAF.",
             "hook1_boot_awakening": "LiveViewProcess3aContoller (0x53676ab8) -> Cave 1 (0x53000d60) zeroes STATUS_VA (0x52c00100..0x52c0011f) on singleton creation without blocking early-boot 3A init on SD I/O",
             "hook2_continuous_ai_af": "FaceDetectionService::Task (0x5389639c) -> Cave 2 (0x53000e00) uses constructor-zeroed [r4, #0x13e] to initialize boot retry counter, polls SD card ('C') and internal memory ('I'), uses correct return check (bne cave2_load_ok for 1==SUCCESS), calls StartDsp(r1=0x52100000), then executes pure K-3 III CEVA-XM4 CNN inference",
             "safe_ddr_zones": "All shared buffers relocated to verified unmanaged, fully-mapped DDR (0x52930000..0x53000000): Weights @ 0x52960000..0x52a76220, Tensor In @ 0x52b00000, Tensor Out @ 0x52b09a00, Msg @ 0x52c00000, Status @ 0x52c00100 - zero collision with weights or RTOS Live View Pool[8]",
@@ -204,7 +206,7 @@ def build_stage3_release():
         print(f"    0x{ins.address:08x}: {ins.mnemonic:8s} {ins.op_str}")
 
     print("\n" + "=" * 70)
-    print("SUCCESS: Stage 3 Pure K-3 III Deep Learning Exclusive AF (v1.2.3) Built & Verified!")
+    print("SUCCESS: Stage 3 Pure K-3 III Deep Learning Exclusive AF (v1.2.4) Built & Verified!")
     print("=" * 70)
 
 if __name__ == "__main__":
