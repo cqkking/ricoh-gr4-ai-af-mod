@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-build_stage3_firmware.py - Pack Verified Pure K-3 III Deep Learning Exclusive AF Firmware (v1.2.4)
+build_stage3_firmware.py - Pack Verified Pure K-3 III Deep Learning Exclusive AF Firmware (v1.2.5)
 
 Rebased onto official Ricoh GR IV v1.20 baseline firmware.
 Stock FotoNation Level 1 AF bypassed 100% in Cave 2.
 Features on-demand DspService instantiation and dual-box visual telemetry diagnostics.
+v1.2.5 fixes output heatmap offset to 0x52b02a00 (work_buf + 0x2a00) and extends IPC timeout to 5000 ms (0x1388).
 
 Builds:
   1. Preserved Stage 3 Firmware: output/fwdc248b_stage3_ai_track.bin
@@ -70,7 +71,7 @@ def v2p(vaddr: int) -> int:
 
 def build_stage3_release():
     print("=" * 70)
-    print("Ricoh GR IV Hybrid AI Live View Tracking Firmware Rebuilder (v1.2.4)")
+    print("Ricoh GR IV Hybrid AI Live View Tracking Firmware Rebuilder (v1.2.5)")
     print("Baseline: Official Ricoh GR IV Firmware v1.20")
     print("=" * 70)
 
@@ -139,8 +140,8 @@ def build_stage3_release():
 
     # Save release manifest
     manifest = {
-        "release_type": "Pure K-3 III Deep Learning Exclusive AF with On-Demand DspService & Dual Diagnostics (v1.2.4)",
-        "version": "1.2.4",
+        "release_type": "Pure K-3 III Deep Learning Exclusive AF with On-Demand DspService & Dual Diagnostics (v1.2.5)",
+        "version": "1.2.5",
         "baseline_firmware": "Official Ricoh GR IV Firmware v1.20",
         "official_fw_sha256": sha256_hex(raw_fw),
         "firmware": {
@@ -159,12 +160,12 @@ def build_stage3_release():
             "dual_box_diagnostics": "Dual visual telemetry: (1) Top-Left Box (x=40, y=40, 32x32, score=88): Triggers if DspService is instantiated but LoadDsp fails on SD card. (2) Lower-Right Heartbeat Box (x=240, y=140, 32x32, score=99): Triggers when DSP boots, AHIP frames dequeue, and IPC WaitMessage succeeds, but no subject is detected in current frame. (3) Dynamic Green Box: Subject detected by neural network and tracked by PDAF.",
             "hook1_boot_awakening": "LiveViewProcess3aContoller (0x53676ab8) -> Cave 1 (0x53000d60) zeroes STATUS_VA (0x52c00100..0x52c0011f) on singleton creation without blocking early-boot 3A init on SD I/O",
             "hook2_continuous_ai_af": "FaceDetectionService::Task (0x5389639c) -> Cave 2 (0x53000e00) uses constructor-zeroed [r4, #0x13e] to initialize boot retry counter, polls SD card ('C') and internal memory ('I'), uses correct return check (bne cave2_load_ok for 1==SUCCESS), calls StartDsp(r1=0x52100000), then executes pure K-3 III CEVA-XM4 CNN inference",
-            "safe_ddr_zones": "All shared buffers relocated to verified unmanaged, fully-mapped DDR (0x52930000..0x53000000): Weights @ 0x52960000..0x52a76220, Tensor In @ 0x52b00000, Tensor Out @ 0x52b09a00, Msg @ 0x52c00000, Status @ 0x52c00100 - zero collision with weights or RTOS Live View Pool[8]",
+            "safe_ddr_zones": "All shared buffers relocated to verified unmanaged, fully-mapped DDR (0x52930000..0x53000000): Weights @ 0x52960000..0x52a76220, Tensor In @ 0x52b00000, Tensor Out @ 0x52b02a00, Msg @ 0x52c00000, Status @ 0x52c00100 - zero collision with weights or RTOS Live View Pool[8]",
             "cold_start_lock": "Seeds [r4, #0x100..0x10c] = (rect_cx, rect_cy, box_size, box_size), [r4, #0x118]/[r4, #0x11c] = face_id, [r4, #0x13c] = 1, [r4, #0x121] = 0, [r4, #0x124] = 0 so SelectMainFace and EVENT 0x04070001 lock instantaneously on Frame 1 from any head pose",
             "frame_source": "Completed Ahip ring descriptor *(*(0x550813d0 + 0x434)) (fallback 0x424 / 0x1c / 0x14) dequeued by AhipService::WaitFrame + ARM D-Cache invalidate (0x5391801c) prior to CPU read",
             "downsampler": "Aspect-ratio-aware ([r4, #0xfc] x [r4, #0xfe]) YUV420 -> 3-plane 56x56 (row stride 64) RGB tensor @ 0x52b00000 with C0-continuous 2.0x backlit shadow recovery (Y < 48 -> 2x, 48..144 -> 72 + Y/2) + ARM D-Cache clean/barrier (0x5391808c)",
-            "dsp_inference": "msg_id 4 via SendMessage (0x5398e478) & WaitMessage (0x5398e794, timeout 100 ms) with full K-3 III weights @ 0x52960000 (677,824 B) & 0x52a057c0 (461,408 B)",
-            "output_heatmap": "Head-priority (fg = max(Ch1, Ch2 - 2)) 3-channel 56x56 (row stride 64) int16_t segmentation map @ 0x52b09a00 + D-Cache invalidate (0x5391801c)",
+            "dsp_inference": "msg_id 4 via SendMessage (0x5398e478) & WaitMessage (0x5398e794, timeout 5000 ms) with full K-3 III weights @ 0x52960000 (677,824 B) & 0x52a057c0 (461,408 B)",
+            "output_heatmap": "Head-priority (fg = max(Ch1, Ch2 - 2)) 3-channel 56x56 (row stride 64) int16_t segmentation map @ 0x52b02a00 + D-Cache invalidate (0x5391801c)",
             "confidence_threshold": "max_diff >= 3 and area_cnt >= 2",
             "face_result_structure": "100-byte zeroed m_DetectedFaceResult [r4, #0x78] in aspect-ratio-scaled Q8 fixed-point with dynamic blob-area box sizing [0x2800..0x5c00]",
             "af_tracking_target": "Native dispatch via UpdateFaceDetectionResult (0x538959f4); directly populates m_DetectedFaceResult and updates FdLibraryService state",
@@ -206,7 +207,7 @@ def build_stage3_release():
         print(f"    0x{ins.address:08x}: {ins.mnemonic:8s} {ins.op_str}")
 
     print("\n" + "=" * 70)
-    print("SUCCESS: Stage 3 Pure K-3 III Deep Learning Exclusive AF (v1.2.4) Built & Verified!")
+    print("SUCCESS: Stage 3 Pure K-3 III Deep Learning Exclusive AF (v1.2.5) Built & Verified!")
     print("=" * 70)
 
 if __name__ == "__main__":

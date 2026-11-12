@@ -4,9 +4,9 @@
 
 [![平台: Socionext Milbeaut M10V](https://img.shields.io/badge/平台-Socionext%20Milbeaut%20M10V-007acc.svg)](#)
 [![适配固件: Ricoh GR IV v1.20](https://img.shields.io/badge/目标固件-v1.20%20fwdc248b.bin-green.svg)](#)
-[![版本: v1.2.4](https://img.shields.io/badge/版本-v1.2.4-blue.svg)](#)
+[![版本: v1.2.5](https://img.shields.io/badge/版本-v1.2.5-blue.svg)](#)
 [![架构: ARM Cortex-A7 + CEVA-CV DSP](https://img.shields.io/badge/芯片架构-ARMv7%20%2B%20CEVA--CV%20DSP-orange.svg)](#)
-[![状态: 纯 K-3 III 深度学习独占验证通过](https://img.shields.io/badge/验证状态-纯%20K--3%20III%20深度学习独占%20%26%20双框遥测诊断%20(v1.2.4)-brightgreen.svg)](#)
+[![状态: 纯 K-3 III 深度学习独占验证通过](https://img.shields.io/badge/验证状态-纯%20K--3%20III%20深度学习独占%20%26%20双框遥测诊断%20(v1.2.5)-brightgreen.svg)](#)
 [![开源协议: MIT](https://img.shields.io/badge/协议-MIT-blue.svg)](#)
 
 本项目是针对 **理光 GR IV (GR4)** 数码相机的非官方底层固件扩展补丁。它通过破译芯片内存映射与二进制驱动协议，成功激活了片上完全闲置的 **CEVA-CV 矢量 AI DSP 硬件协处理器**（物理基地址 `0x41000000`），构建了**相机原生 FotoNation 60 fps 硬件人脸/人眼极速跟踪**与**宾得旗舰单反 Pentax K-3 Mark III 深度学习主体识别卷积神经网络**相融合的真·混合自动对焦（Hybrid AF）系统，并直连挂接进 GR4 原生的 165 点片上相位差检测自动对焦（PDAF）管线。
@@ -186,7 +186,10 @@ SD 卡根目录 (C:\)
 │   ├── FEAT_DSP_STAGE3_AI_TRACK.md  # 混合 AI-AF 完整白皮书
 │   ├── FEAT_K3_AF_PORT.md           # 宾得 K-3 III 自动对焦移植报告
 │   ├── RELEASE_NOTES_v1.2.0.md      # v1.2.0 版本发布说明
-│   └── RELEASE_NOTES_v1.2.1.md      # v1.2.1 版本发布说明
+│   ├── RELEASE_NOTES_v1.2.1.md      # v1.2.1 版本发布说明
+│   ├── RELEASE_NOTES_v1.2.3.md      # v1.2.3 版本发布说明
+│   ├── RELEASE_NOTES_v1.2.4.md      # v1.2.4 版本发布说明
+│   └── RELEASE_NOTES_v1.2.5.md      # v1.2.5 版本发布说明
 ├── src/
 │   └── dsp_ai/
 │       ├── build_firmware.py        # 固件主构建与容器封装入口
@@ -230,13 +233,14 @@ python src/dsp_ai/build_firmware.py
 | `FlushDataCache` | `0x538f04c4` | CPU 写入输入 RGB 张量后写回数据缓存以供 DSP DMA 读取 |
 | `DspFactory::GetDspService()` | `0x5398d97c` | 获取片上 CEVA-CV `DspService` 驱动单例指针 |
 | `DspService::LoadDsp` | `0x5398ee0c` | 从 SD 卡根目录 (`C:\`) 载入 `DF_EX.BIN`, `DF_ID_S.BIN`, `DF_IP.BIN` |
-| `DspService::Start` | `0x5398e2b0` | 解除 DSP 复位，从 `0x515fc000` 启动矢量计算核心 |
-| `DspService::SendMessage` | `0x5398e45c` | 派发 Message ID 4（神经网络卷积推断请求） |
-| `DspService::WaitMessage` | `0x5398e778` | 阻塞等待 DSP 完成推断信号量（超时 100 ms） |
+| `DspService::Start` | `0x5398e2cc` | 解除 DSP 复位，从 `0x52100000` 启动矢量计算核心 |
+| `DspService::SendMessage` | `0x5398e478` | 派发 Message ID 4（神经网络卷积推断请求） |
+| `DspService::WaitMessage` | `0x5398e794` | 阻塞等待 DSP 完成推断信号量（超时 5000 ms Watchdog） |
 | `m_DetectedFaceResult` | `[FaceDetectionService, #0x78]` | 100 字节人脸/主体结构体数组（Q8 坐标、眼部、置信度等） |
 | `FdLibraryService` | `[FaceDetectionService, #0x38]` | 原厂服务句柄，`+0x30` 保存识别目标数 `face_count` |
-| `UpdateFaceDetectionResult` | `0x53895af4` | 向 LCD 取景渲染线程与 165 点 PDAF 驱动派发对焦坐标 |
+| `UpdateFaceDetectionResult` | `0x538959f4` | 向 LCD 取景渲染线程与 165 点 PDAF 驱动派发对焦坐标 |
 | `TENSOR_IN_VA` (`work_buf`) | `0x52b00000` | 重构后的张量输入缓冲区（777,792 B），与静态权重 0 冲突 |
+| `TENSOR_OUT_VA` | `0x52b02a00` | 热力图输出缓冲区（`work_buf + 0x2a00`，3 通道 int16 56x56，stride 64） |
 | `MEAN_WEIGHTS_VA` | `0x52960000` | 分块 1 静态 CNN 主干网络权重（677,824 B） |
 | `HEAD_WEIGHTS_VA` | `0x52a057c0` | 分块 2 静态 CNN 分类头网络权重（461,408 B） |
 
@@ -244,7 +248,16 @@ python src/dsp_ai/build_firmware.py
 
 ## 8. 版本更新履历
 
-### v1.2.4 (当前最新版本)
+### v1.2.5 (当前最新版本)
+- **`TENSOR_OUT_VA` 热力图偏移精确对齐（人脸与猫脸无法识别根因修复）**：
+  - 严格反汇编逆向核算宾得 K-3 III `DeepLearningService`（`0x5302cc0c..0x5302cc3c`），确定 CEVA-XM4 DSP 输出热力图确凿起始于 `work_buf + 0x2a00`（`0x52b02a00`）。
+  - 彻底纠正了 v1.2.4 中错误设置的 `0x52b09a00` 错位偏移（偏离达 28 KB 全零内存），使人脸、侧脸与宠物热力图数据完整送达寻峰扫描器！
+- **5000 ms 跨核 IPC Watchdog 超时（插槽泄漏与白框闪退根因修复）**：
+  - 对齐宾得官方标准，将 `SendMessage` 与 `WaitMessage` 超时扩容至 5000 ms（`movw r3, #0x1388` / `movw r2, #0x1388`）。
+  - 彻底根治 100 ms 短超时在开机总线并发时引发的 6 个 slot 泄漏与队列死锁，确保对焦框持久稳定运行！
+- **固件校验码**：`fwdc248b.bin`（39,109,096 字节，SHA-256：`91603cfdb046c9377136f905bdd71ded756e98b46801aa9f02fcc975c4e81a64`）。
+
+### v1.2.4
 - **`DspService` 按需动态实例化（根因彻底修复）**：
   - 审计发现理光商业固件在系统开机时完全剔除了对 DSP 分区的启动调用，从未调用 `CreateDspService` (`0x5398d8fc`)，导致 `m_dspService` 单例成员 `[0x553a3164]` 恒为 NULL (0)。在此前的 Cave 2 中，第 4 条指令检查 `r5 == 0` 时从第 1 帧开始直到关机全部无条件跳转至 `clear_and_exit`，导致重试计数器与诊断心跳框从未执行！
   - Cave 2 现已加入动态按需创建机制：若检测到 `[0x553a3164] == 0`，立即在第 1 帧动态调用 `DspFactory::CreateDspService(this, 0)` (`0x5398d8fc`)，自动完成 0x60 堆内存分配、构造函数执行与跨核 RTOS 通信原语（`DspMtx`、`DspSF`、`DspReq`、`DspExc`）的初始化与挂载。

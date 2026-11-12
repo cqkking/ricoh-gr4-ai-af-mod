@@ -4,9 +4,9 @@
 
 [![Platform: Socionext Milbeaut M10V](https://img.shields.io/badge/Platform-Socionext%20Milbeaut%20M10V-007acc.svg)](#)
 [![Target: Ricoh GR IV v1.20](https://img.shields.io/badge/Target%20Firmware-v1.20%20fwdc248b.bin-green.svg)](#)
-[![Version: v1.2.4](https://img.shields.io/badge/Version-v1.2.4-blue.svg)](#)
+[![Version: v1.2.5](https://img.shields.io/badge/Version-v1.2.5-blue.svg)](#)
 [![Architecture: ARM Cortex-A7 + CEVA-CV DSP](https://img.shields.io/badge/Architecture-ARMv7%20%2B%20CEVA--CV%20DSP-orange.svg)](#)
-[![Status: Pure K-3 III Deep Learning Exclusive AF (Dual WordSum=0)](https://img.shields.io/badge/Status-Pure%20K--3%20III%20DL%20Exclusive%20AF%20(v1.2.4)-brightgreen.svg)](#)
+[![Status: Pure K-3 III Deep Learning Exclusive AF (Dual WordSum=0)](https://img.shields.io/badge/Status-Pure%20K--3%20III%20DL%20Exclusive%20AF%20(v1.2.5)-brightgreen.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#)
 
 Unofficial firmware modification for the **Ricoh GR IV (GR4)** digital camera that unlocks the dormant on-die **CEVA-CV vector AI DSP co-processor** (`0x41000000`) and unites camera-native **FotoNation 60 fps hardware Face/Eye tracking** with **Pentax K-3 Mark III's deep learning subject recognition neural network** directly into Ricoh's native 165-point on-sensor Phase Detection Autofocus (PDAF) system.
@@ -193,7 +193,8 @@ SD Card Root (C:\)
 │   ├── RELEASE_NOTES_v1.2.0.md      # v1.2.0 release notes
 │   ├── RELEASE_NOTES_v1.2.1.md      # v1.2.1 release notes
 │   ├── RELEASE_NOTES_v1.2.3.md      # v1.2.3 release notes
-│   └── RELEASE_NOTES_v1.2.4.md      # v1.2.4 release notes
+│   ├── RELEASE_NOTES_v1.2.4.md      # v1.2.4 release notes
+│   └── RELEASE_NOTES_v1.2.5.md      # v1.2.5 release notes
 ├── src/
 │   └── dsp_ai/
 │       ├── build_firmware.py        # Master firmware packager & container rebuilder
@@ -287,12 +288,12 @@ Baseline: Official Ricoh GR IV Firmware v1.20
 | `DspService::LoadDsp` | `0x5398ee0c` | Loads `DF_EX.BIN`, `DF_ID_S.BIN`, `DF_IP.BIN` from SD card root (Drive `C:\`) |
 | `DspService::Start` | `0x5398e2b0` | Deasserts DSP reset, starts execution at `0x52100000` |
 | `DspService::SendMessage` | `0x5398e45c` | Dispatches Message ID 4 (Inference request) |
-| `DspService::WaitMessage` | `0x5398e778` | Awaits tensor inference completion (timeout 100 ms) |
+| `DspService::WaitMessage` | `0x5398e778` | Awaits tensor inference completion (timeout 5000 ms Watchdog) |
 | `m_DetectedFaceResult` | `[FaceDetectionService, #0x78]` | Array of 100-byte face structures (`x, y, w, h, eye1, eye2, mouth, score`) |
 | `FdLibraryService` | `[FaceDetectionService, #0x38]` | Subsystem holding detected face count @ `+0x30` |
 | `UpdateFaceDetectionResult` | `0x53895af4` | Submits face/eye coordinates to LCD OSD display task & AF engine |
 | `TENSOR_IN_VA` (`work_buf`) | `0x52b00000` | Relocated input tensor buffer (777,792 B), 0 byte collision with static weights |
-| `TENSOR_OUT_VA` | `0x52b09a00` | Heatmap output buffer (3-channel int16 56x56, stride 64) with D-Cache invalidate |
+| `TENSOR_OUT_VA` | `0x52b02a00` | Heatmap output buffer (`work_buf + 0x2a00`, 3-channel int16 56x56, stride 64) with D-Cache invalidate |
 | `MEAN_WEIGHTS_VA` | `0x52960000` | Chunk 1 static CNN backbone weights (677,824 B) |
 | `HEAD_WEIGHTS_VA` | `0x52a057c0` | Chunk 2 static CNN head classification weights (461,408 B) |
 
@@ -300,7 +301,14 @@ Baseline: Official Ricoh GR IV Firmware v1.20
 
 ## 8. Release Changelog
 
-### v1.2.4 (Current Release)
+### v1.2.5 (Current Release)
+- **TENSOR_OUT_VA Heatmap Offset Alignment (Face/Cat Recognition Fix)**:
+  - Corrected output heatmap address to `0x52b02a00` (`work_buf + 0x2a00`). In v1.2.4, an erroneous offset of `0x52b09a00` (+28 KB) caused the peak finder to scan uninitialized zero memory, permanently suppressing detections.
+- **5000 ms IPC Watchdog Timeout (Queue Slot Leak Fix)**:
+  - Aligned IPC timeout with Pentax K-3 III official watchdog standard (`movw r3, #0x1388` / `movw r2, #0x1388`, 5000 ms). Eliminates transient 100 ms timeouts that leaked `DspService` slots and locked the queue after 6 frames.
+- **Binary Checksum**: `fwdc248b.bin` (39,109,096 bytes, SHA-256: `91603cfdb046c9377136f905bdd71ded756e98b46801aa9f02fcc975c4e81a64`).
+
+### v1.2.4
 - **On-Demand `DspService` Instantiation (Root Cause Fix)**:
   - Discovered that Ricoh commercial firmware omits DSP partition initialization, leaving `[0x553a3164]` permanently NULL (`0`). In Cave 2, instruction 4 tested `m_dspService == 0` and unconditionally jumped to `clear_and_exit` on frame 1 to infinity!
   - Cave 2 now dynamically calls `DspFactory::CreateDspService(this, 0)` (`0x5398d8fc`) on frame 1, instantiating `DspService`, constructing `DspMtx`, `DspSF`, `DspReq`, `DspExc`, and mounting queues.

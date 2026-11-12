@@ -53,7 +53,7 @@ MEAN_WEIGHTS_VA        = 0x52960000 # Full K-3 III 0x53932548..0x539d7d08 block 
 HEAD_WEIGHTS_VA        = 0x52a057c0 # Full K-3 III 0x539d7d08..0x53a48768 block (461,408 B) loaded by DF_EX.BIN Chunk 1
 # Chunk 2 ends at 0x52a76220. All runtime buffers placed safely at 0x52b00000+ (>565 KB above Chunk 2!):
 TENSOR_IN_VA           = 0x52b00000 # work_buf (0xbde40 B): 3-plane 56x56 (stride 64) RGB input @ +0x0000, +0x0e00, +0x1c00
-TENSOR_OUT_VA          = 0x52b09a00 # work_buf + 0x9a00: 3-channel 56x56 (stride 64) int16_t segmentation output
+TENSOR_OUT_VA          = 0x52b02a00 # work_buf + 0x2a00: 3-channel 56x56 (stride 64) int16_t segmentation output
 TENSOR_MSG_VA          = 0x52c00000 # 40-byte (0x28 B) DspCommandParameter buffer (outside work_buf!)
 STATUS_VA              = 0x52c00100 # Telemetry & one-shot wakeup guard in DSP shared DRAM (outside work_buf!)
 
@@ -440,28 +440,28 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     insns.append(0xe3a00000) # mov  r0, #0
     insns.append(0xe1c600b0) # strh r0, [r6]
 
-    # 12. Call DspService::SendMessage(m_dspService, &seq, msg_id=4, timeout=100, &msg)
+    # 12. Call DspService::SendMessage(m_dspService, &seq, msg_id=4, timeout=5000, &msg)
     insns.append(0xe1a00005) # mov  r0, r5 (svc)
     insns.append(0xe1a01006) # mov  r1, r6 (&seq)
     insns.append(0xe3a02004) # mov  r2, #4 (msg_id = 4)
-    insns.append(0xe3a03064) # mov  r3, #100 (timeout = 100 ms)
+    insns.append(encode_movw(3, 5000)) # movw r3, #0x1388 (timeout = 5000 ms, Pentax K-3 III official watchdog)
     insns.append(0xe58d7000) # str  r7, [sp] (&msg)
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, SEND_MSG_VA, is_bl=True))
     insns.append(0xe3500000) # cmp  r0, #0
     branch_to("clear_and_exit", is_bl=False, cond=0x1) # bne .clear_and_exit
 
-    # 13. Call DspService::WaitMessage(m_dspService, seq, timeout=100, &resp)
+    # 13. Call DspService::WaitMessage(m_dspService, seq, timeout=5000, &resp)
     insns.append(0xe1a00005) # mov  r0, r5 (svc)
     insns.append(0xe1d610b0) # ldrh r1, [r6] (seq)
-    insns.append(0xe3a02064) # mov  r2, #100 (timeout = 100 ms)
+    insns.append(encode_movw(2, 5000)) # movw r2, #0x1388 (timeout = 5000 ms, Pentax K-3 III official watchdog)
     insns.append(0xe1a03007) # mov  r3, r7 (&resp)
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, WAIT_MSG_VA, is_bl=True))
     insns.append(0xe3500000) # cmp  r0, #0
     branch_to("clear_and_exit", is_bl=False, cond=0x1) # bne .clear_and_exit
 
-    # 14. Invalidate ARM D-Cache for output heatmap @ 0x52b09a00 (size 0x5400 = 3 * 0x1c00)
+    # 14. Invalidate ARM D-Cache for output heatmap @ 0x52b02a00 (size 0x5400 = 3 * 0x1c00)
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, GET_CACHE_MGR_VA, is_bl=True))
     emit_ldr_imm32(insns, 1, TENSOR_OUT_VA)
@@ -469,7 +469,7 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
     curr_pc = cave_va + len(insns) * 4
     insns.append(encode_arm_branch(curr_pc, INVAL_DCACHE_VA, is_bl=True))
 
-    # 15. Scan 3-channel 56x56 (stride 64) int16_t output heatmap @ 0x52b09a00
+    # 15. Scan 3-channel 56x56 (stride 64) int16_t output heatmap @ 0x52b02a00
     emit_ldr_imm32(insns, 0, TENSOR_OUT_VA)
     branch_to("sub_find_peak", is_bl=True, cond=0xe) # returns r0: max_diff, r1: col, r2: row, r3: area_cnt
 
@@ -757,7 +757,7 @@ def build_cave2_payload(cave_va: int = CAVE2_VA) -> bytes:
 
     # ---------------------------------------------------------------------
     # Subroutine: Head-Priority 3-Channel 56x56 (Stride 64) int16_t Heatmap Scanner
-    # Input:  r0 = TENSOR_OUT_VA (0x52b09a00)
+    # Input:  r0 = TENSOR_OUT_VA (0x52b02a00)
     # Output: r0 = max_diff, r1 = best_col (0..55), r2 = best_row (0..55), r3 = area_cnt
     # ---------------------------------------------------------------------
     mark_label("sub_find_peak")

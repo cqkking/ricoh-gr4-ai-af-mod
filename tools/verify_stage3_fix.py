@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-verify_stage3_fix.py - Comprehensive Automated Verification Suite for v1.2.4
+verify_stage3_fix.py - Comprehensive Automated Verification Suite for v1.2.5
 
 Validates:
   1. Outer & inner payload word_sum checksums strictly equal 0
@@ -9,12 +9,13 @@ Validates:
   4. On-demand instantiation of DspService: Cave 2 calls CreateDspService (0x5398d8fc)
   5. Dual-drive DSP loading: LoadDsp (0x5398ee2c) called with Drive 'C' and 'I'
   6. DSP boot base address: StartDsp (0x5398e2cc) called with r1=0x52100000
-  7. CEVA IPC: SendMessage (0x5398e478) and WaitMessage (0x5398e794)
-  8. Top-Left SD Error diagnostic box (left=0x2800, top=0x2800, score=88)
-  9. Lower-Right Heartbeat diagnostic box (left=0x0f000, top=0x08c00, score=99)
- 10. AI Resume Trampoline: exits to 0x538963ac (UpdateFaceDetectionResult)
- 11. Memory boundaries: Cave 2 ends safely before Desc Table @ 0x53001600
- 12. SD card companion files: DF_EX.BIN, DF_ID_S.BIN, DF_IP.BIN
+  7. CEVA IPC: SendMessage (0x5398e478) and WaitMessage (0x5398e794) with 5000 ms timeout (0x1388)
+  8. Output Heatmap offset: exactly at 0x52b02a00 (work_buf + 0x2a00)
+  9. Top-Left SD Error diagnostic box (left=0x2800, top=0x2800, score=88)
+ 10. Lower-Right Heartbeat diagnostic box (left=0x0f000, top=0x08c00, score=99)
+ 11. AI Resume Trampoline: exits to 0x538963ac (UpdateFaceDetectionResult)
+ 12. Memory boundaries: Cave 2 ends safely before Desc Table @ 0x53001600
+ 13. SD card companion files: DF_EX.BIN, DF_ID_S.BIN, DF_IP.BIN
 """
 
 import sys
@@ -98,14 +99,23 @@ def run_checks():
     assert any(hex(START_DSP_VA) in tgt for tgt in all_targets), f"StartDsp ({hex(START_DSP_VA)}) not called!"
     print(f"  [+] PASS: Cave 2 calls LoadDsp ({hex(LOAD_DSP_VA)}) and StartDsp ({hex(START_DSP_VA)})")
 
-    # Check 6: Cave 2 calls SendMessage & WaitMessage
-    print("\n[Check 6] Cave 2 CEVA IPC Messaging...")
+    # Check 6: Cave 2 calls SendMessage & WaitMessage with 5000 ms timeout
+    print("\n[Check 6] Cave 2 CEVA IPC Messaging & Timeout...")
     assert any(hex(SEND_MSG_VA) in tgt for tgt in all_targets), f"SendMessage ({hex(SEND_MSG_VA)}) not called!"
     assert any(hex(WAIT_MSG_VA) in tgt for tgt in all_targets), f"WaitMessage ({hex(WAIT_MSG_VA)}) not called!"
-    print(f"  [+] PASS: Cave 2 calls SendMessage ({hex(SEND_MSG_VA)}) and WaitMessage ({hex(WAIT_MSG_VA)})")
+    has_5000ms_timeout = sum(1 for ins in c2_full_ins if ins.mnemonic == "movw" and "#0x1388" in ins.op_str) >= 2
+    assert has_5000ms_timeout, "5000 ms (0x1388) timeout not configured for SendMessage and WaitMessage!"
+    print(f"  [+] PASS: Cave 2 calls SendMessage ({hex(SEND_MSG_VA)}) and WaitMessage ({hex(WAIT_MSG_VA)}) with 5000 ms timeout (0x1388)")
 
-    # Check 7: Dual-Box Diagnostic values
-    print("\n[Check 7] Cave 2 Visual Telemetry Diagnostics...")
+    # Check 7: Output Heatmap VA configuration
+    print("\n[Check 7] Output Heatmap Memory Mapping...")
+    from stage3_ai_patcher import TENSOR_OUT_VA, TENSOR_IN_VA
+    assert TENSOR_OUT_VA == 0x52b02a00, f"TENSOR_OUT_VA must be 0x52b02a00 (got {hex(TENSOR_OUT_VA)})"
+    assert TENSOR_OUT_VA == TENSOR_IN_VA + 0x2a00, "TENSOR_OUT_VA must immediately follow 56x56 RGB input (0x2a00 B)!"
+    print(f"  [+] PASS: Output Heatmap VA = {hex(TENSOR_OUT_VA)} (work_buf + 0x2a00)")
+
+    # Check 8: Dual-Box Diagnostic values
+    print("\n[Check 8] Cave 2 Visual Telemetry Diagnostics...")
     # Look for top-left error box (0x2800 / score 88 = 0x58) and heartbeat box (0xf000 / score 99 = 0x63)
     has_sd_box_score = any(ins.op_str.endswith("#0x58") for ins in c2_full_ins)
     has_hb_box_score = any(ins.op_str.endswith("#0x63") for ins in c2_full_ins)
@@ -113,14 +123,14 @@ def run_checks():
     assert has_hb_box_score, "heartbeat_box score 99 not found in Cave 2!"
     print("  [+] PASS: Verified SD error box (score 88) & Heartbeat box (score 99)")
 
-    # Check 8: Cave 2 exit trampoline
-    print("\n[Check 8] Cave 2 AI Resume Trampoline...")
+    # Check 9: Cave 2 exit trampoline
+    print("\n[Check 9] Cave 2 AI Resume Trampoline...")
     has_resume_branch = any("0x538963ac" in ins.op_str for ins in c2_full_ins if ins.mnemonic in ("b", "bx"))
     assert has_resume_branch, f"HOOK2_AI_RESUME_VA ({hex(HOOK2_AI_RESUME_VA)}) not branched to!"
     print(f"  [+] PASS: Cave 2 safely exits to {hex(HOOK2_AI_RESUME_VA)} (UpdateFaceDetectionResult)")
 
-    # Check 9: Memory margin between Cave 2 and Desc Table
-    print("\n[Check 9] Cave 2 Payload Size & Safety Margins...")
+    # Check 10: Memory margin between Cave 2 and Desc Table
+    print("\n[Check 10] Cave 2 Payload Size & Safety Margins...")
     c2_payload = build_cave2_payload(CAVE2_VA)
     c2_len = len(c2_payload)
     margin = DESC_TABLE_VA - (CAVE2_VA + c2_len)
@@ -130,8 +140,8 @@ def run_checks():
     assert margin > 0, f"Cave 2 overflows into Desc Table by {-margin} bytes!"
     print(f"  [+] PASS: Cave 2 fits with {margin} bytes safety margin before Desc Table.")
 
-    # Check 10: SD card dependencies
-    print("\n[Check 10] SD Card companion binaries...")
+    # Check 11: SD card dependencies
+    print("\n[Check 11] SD Card companion binaries...")
     sd_dir = WORKTREE_ROOT / "output" / "sd_card"
     for name, exp_size in [("DF_EX.BIN", 5251648), ("DF_ID_S.BIN", 65536), ("DF_IP.BIN", 16384)]:
         p = sd_dir / name
@@ -140,7 +150,7 @@ def run_checks():
         print(f"  [+] PASS: {name} ({p.stat().st_size:,} bytes, SHA-256: {sha256_hex(p.read_bytes())[:16]}...)")
 
     print("\n" + "=" * 70)
-    print("ALL 10 VERIFICATION CHECKS PASSED FOR v1.2.4 RELEASE!")
+    print("ALL 11 VERIFICATION CHECKS PASSED FOR v1.2.5 RELEASE!")
     print("=" * 70)
 
 if __name__ == "__main__":
