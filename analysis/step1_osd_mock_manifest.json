@@ -1,0 +1,28 @@
+{
+  "firmware": {
+    "worktree_path": "D:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\fwdc248b_step1_osd_mock.bin",
+    "root_path": "d:\\Ricoh GR4 firmware Mod\\output\\fwdc248b_step1_osd_mock.bin",
+    "size": 38955924,
+    "sha256": "ac03479c2ce5c1a9fbf6db32d848eb8f35cf322cc3a236ff6968cba52868acef",
+    "modified_payload_bytes": 211,
+    "inner_word_sum": "0x0",
+    "outer_word_sum": "0x0"
+  },
+  "patch": {
+    "stage": "Step 1: Pure OSD / PDAF Canonical Injection Verification",
+    "baseline": "Official Ricoh GR IV Firmware v1.20",
+    "hook": {
+      "site_vaddr": "0x5389639c",
+      "offset": "0x8ae0c4",
+      "original_hex": "380094e57b40ffeb",
+      "patched_hex": "97aaddea0000a0e1",
+      "resume_vaddr": "0x538963ac"
+    },
+    "code_cave": {
+      "vaddr": "0x53000e00",
+      "offset": "0x18b28",
+      "length": 232,
+      "box_size_q8": "0x3000"
+    }
+  }
+}

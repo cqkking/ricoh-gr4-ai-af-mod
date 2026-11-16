@@ -1,0 +1,100 @@
+{
+  "firmware": {
+    "path": "d:\\Ricoh GR4 firmware Mod\\output\\fwdc248b_step2a_dsp_probe.bin",
+    "size": 39109096,
+    "sha256": "8a258f0207ea9973c68161bc55613260b167525efb80c76dc493efa21eaa28cf",
+    "modified_payload_bytes": 19997,
+    "word_sum": "0x0"
+  },
+  "sd_card_files": {
+    "DF_EX.BIN": {
+      "path": "D:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\sd_card\\DF_EX.BIN",
+      "size": 5251648,
+      "sha256": "b16788a16a11ecc2c007d26888a56195b2b4e1bec8aa05b74ea6789803ae8d44",
+      "target_va": "0x52100000",
+      "payload_size": 4112384
+    },
+    "DF_ID_S.BIN": {
+      "path": "D:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\sd_card\\DF_ID_S.BIN",
+      "size": 65536,
+      "sha256": "3d3ebf29622323bb4a203347feaf676aeac110a7b1181604270a1ae0c22b0a2a",
+      "target_va": "0x524ec000"
+    },
+    "DF_IP.BIN": {
+      "path": "D:\\Ricoh GR4 firmware Mod\\worktrees\\feat-dsp-ai-af\\output\\sd_card\\DF_IP.BIN",
+      "size": 16384,
+      "sha256": "cf409a84f3f2d8fac1491634ecda882c9d76b3439c2423da1b31950463a52067",
+      "target_va": "0x524fc000"
+    }
+  },
+  "patch": {
+    "stage": "Step 2A: Non-Blocking CEVA-XM4 DSP Probe & Visual Telemetry",
+    "baseline": "Official Ricoh GR IV Firmware v1.20",
+    "dual_hooks": {
+      "hook1_boot_awakening": {
+        "site_vaddr": "0x53676ab8",
+        "offset": "0x68e7e0",
+        "original_hex": "0dc0a0e1f0d82de9",
+        "patched_hex": "a828e6ea0000a0e1",
+        "cave_vaddr": "0x53000d60",
+        "cave_length": 84,
+        "resume_vaddr": "0x53676ad4"
+      },
+      "hook2_continuous_ai_af": {
+        "site_vaddr": "0x5389639c",
+        "offset": "0x8ae0c4",
+        "original_hex": "380094e57b40ffeb",
+        "patched_hex": "97aaddea0000a0e1",
+        "cave_vaddr": "0x53000e00",
+        "cave_length": 1104,
+        "ai_resume_vaddr": "0x538963ac",
+        "fallback_resume_vaddr": "0x53896460"
+      }
+    },
+    "code_cave": {
+      "vaddr": "0x53000e00",
+      "offset": "0x18b28",
+      "length": 1104,
+      "hex": "f0472de908d04de2008100e3c08245e33e21d4e5000052e30700001a0000a0e30010a0e3010088e7041081e2200051e3fbffffba0120a0e33e21c4e5480084e20f1b24eb007098e5040057e3c300000a070057e3c800000a050057e3b300000a060057e3b400000a030057e37f00000a020057e33500000a042098e5012082e2042088e5143052e2a200003a1e0d53e3a300002a3f0013e3a100001ab63226eb045090e5000055e30600001a0010a0e3913226eb600103e33a0545e3045090e5000055e39600000a0500a0e14310a0e30020a0e30030a0e3d33726eb000050e30b00001a0500a0e14910a0e30020a0e30030a0e3cc3726eb000050e30400001a0020a0e3042085e50100a0e3000088e5830000ea0500a0e1001000e3101245e30020a0e3e83426eb100088e5042095e5040012e30200001a0500a0e3000088e57a0000ea0200a0e3000088e5710000ea893226eb045090e5000000e3b00245e3801008e3801048e3002a02e3002040e3042052e2021080e7fcffff1a000a02e3b00245e3551505e3551545e3002405e3002040e3042052e2021080e7fcffff1a1a5c24eb001000e3b01245e3ee2ca0e3355c24eb007000e3c07245e3000601e3000345e3000087e50000a0e3040087e5200087e5240087e5000000e3b00245e3080087e5c00705e3a00245e30c0087e5000000e3960245e3100087e5080800e3080040e3140087e50a0c00e30c0c40e3180087e50c0c00e30c0c40e31c0087e5086088e20000a0e3b000c6e10500a0e10610a0e10420a0e36430a0e300708de50c3526eb100088e5000050e30200000a0600a0e3000088e5370000ea0000a0e30c0088e50300a0e3000088e5350000ea413226eb045090e5086088e20500a0e1b010d6e10020a0e3403000e3c03245e3bf3526eb100088e5000050e30300000a0c2098e5012082e20c2088e5250000ead65b24eb001a02e3b01245e3152ba0e3d55b24eb000a02e3b00245e3551505e3551545e30020a0e30030a0e3027090e7010057e101308312042082e2010c52e3f9ffffba143088e5000053e30200000a0400a0e3000088e5140000ea0700a0e3000088e5180000ea1070a0e31080a0e3170000ea1070a0e33880a0e3140000ea1070a0e36080a0e3110000ea1070a0e38880a0e30e0000ea0c2098e5c80052e3c820a0c3407082e23880a0e3080000ea0c2098e50f0052e30f20a0c3dc70a0e3027187e06080a0e3010000eadc70a0e38880a0e3480084e2a03408e3013445e3001093e5e51924eb0774a0e10884a0e1005002e378a094e500005ae32400000a0000a0e30010a0e301008ae7041081e2640051e3fbffffba00708ae504808ae508508ae50c508ae55f9000e34c908ae5181194e5000051e30110a00350108ae5a52087e0002184e5a52088e0042184e5085184e50c5184e5181184e51c1184e50120a0e33c21c4e50000a0e32101c4e5493f84e2b000c3e1383094e5000053e30300000a0110a0e3301083e50010a0e3341083e508d08de2f047bde8565422ea"
+    },
+    "trampoline": {
+      "vaddr": "0x5389639c",
+      "offset": "0x8ae0c4",
+      "original_hex": "380094e57b40ffeb",
+      "patched_hex": "97aaddea0000a0e1",
+      "ai_resume_vaddr": "0x538963ac",
+      "fallback_resume_vaddr": "0x53896460"
+    },
+    "embedded_tables": {
+      "desc_table": {
+        "vaddr": "0x53001600",
+        "offset": "0x19328",
+        "length": 728
+      },
+      "mean_table": {
+        "vaddr": "0x54212890",
+        "offset": "0x122a5b8",
+        "length": 9408
+      },
+      "std_table": {
+        "vaddr": "0x5424e9d0",
+        "offset": "0x12666f8",
+        "length": 9408
+      }
+    },
+    "dsp_io_buffers": {
+      "tensor_input_rgb56x56_stride64": "0x52b00000",
+      "tensor_message_struct": "0x52c00000",
+      "heatmap_output_3ch_56x64_s16": "0x52b02a00",
+      "k3_mean_and_backbone_weights": "0x52960000",
+      "k3_head_weights": "0x52a057c0",
+      "runtime_status_vars": "0x52c00100"
+    },
+    "af_tracking_bridge": {
+      "update_target_vaddr": "0x0",
+      "track_obj_ptr_vaddr": "0x550b8650",
+      "fd_lib_detect_vaddr": "0x53866594",
+      "update_face_result_vaddr": "0x538959f4"
+    }
+  }
+}
