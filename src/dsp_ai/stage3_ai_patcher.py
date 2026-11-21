@@ -137,7 +137,7 @@ def emit_ldr_imm32(insns: list, rd: int, val: int):
 # -------------------------------------------------------------------------
 # Cave 1: Non-Blocking Boot Status Init (0x53000d60)
 # -------------------------------------------------------------------------
-def build_cave1_payload(cave_va: int = CAVE1_VA, resume_va: int = HOOK1_RESUME_VA) -> bytes:
+def build_cave1_payload(cave_va: int = CAVE1_VA, resume_va: int = HOOK1_RESUME_VA, *, status_cookie: int | None = None) -> bytes:
     insns = []
     labels = {}
     relocs = []
@@ -175,6 +175,11 @@ def build_cave1_payload(cave_va: int = CAVE1_VA, resume_va: int = HOOK1_RESUME_V
     insns.append(0xe5832014) # str  r2, [r3, #0x14]
     insns.append(0xe5832018) # str  r2, [r3, #0x18]
     insns.append(0xe583201c) # str  r2, [r3, #0x1c]
+
+    if status_cookie is not None:
+        insns.append(0xe5832020)  # clear the post-update probe's service identity
+        emit_ldr_imm32(insns, 2, status_cookie)
+        insns.append(0xe5832018)  # publish the initialization cookie last
 
     mark_label("exit")
     # 4. Branch cleanly to LiveViewProcess3aContoller resume site (0x53676ad4)
@@ -827,7 +832,8 @@ build_trampoline_payload = build_tramp2_payload
 # -------------------------------------------------------------------------
 # Splicer: Injects Dual Caves, Trampolines & Neural Descriptors
 # -------------------------------------------------------------------------
-def apply_stage3_patch(rtos_binary: bytearray, rtos_payload_offset: int = RTOS_PAYLOAD_START) -> dict:
+def apply_stage3_patch(rtos_binary: bytearray, rtos_payload_offset: int = RTOS_PAYLOAD_START,
+                       *, cave1_builder=None, cave2_builder=None) -> dict:
     dsp_ai_dir = Path(__file__).resolve().parent
     desc_bytes = (dsp_ai_dir / "k3_desc.bin").read_bytes()
     mean_bytes = (dsp_ai_dir / "k3_mean.bin").read_bytes()
@@ -837,10 +843,10 @@ def apply_stage3_patch(rtos_binary: bytearray, rtos_payload_offset: int = RTOS_P
     assert len(mean_bytes) == 9408, f"Unexpected mean size: {len(mean_bytes)}"
     assert len(std_bytes) == 9408, f"Unexpected std size: {len(std_bytes)}"
 
-    cave1_payload = build_cave1_payload()
+    cave1_payload = (cave1_builder or build_cave1_payload)()
     tramp1_payload = build_tramp1_payload()
 
-    cave2_payload = build_cave2_payload()
+    cave2_payload = (cave2_builder or build_cave2_payload)()
     tramp2_payload = build_tramp2_payload()
 
     # Offsets in payload

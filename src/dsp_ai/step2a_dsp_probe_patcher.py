@@ -33,9 +33,16 @@ import stage3_ai_patcher as s3
 # +0x14: canary_diff_cnt
 RESP_BUF_VA = s3.TENSOR_MSG_VA + 0x40
 CANARY_VAL  = 0x55555555
+CONTINUITY_COOKIE = 0x53433243
+CONTINUITY_BUDGET = 4
+CONTINUITY_WAIT_FRAMES = 3
+CONTINUITY_REPLY_MARK = 0xa5c23d7e
+# In post-update mode: +0x18 boot cookie, +0x1c completed count, +0x20 service identity.
+# State 8 is terminal (uncertain completion or service identity change).
 
 
-def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
+def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA, *, post_update: bool = False) -> bytes:
+    """Legacy Step 2A, or a bounded synthetic-only subroutine after stock OSD commit."""
     insns = []
     labels = {}
     relocs = []
@@ -69,22 +76,30 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
 
     # Guarantee one-shot zeroing of STATUS_VA on this boot via constructor-zeroed [r4, #0x13e]
     ldr32(8, s3.STATUS_VA)
-    insns.append(0xe5d4213e)  # ldrb r2, [r4, #0x13e]
-    insns.append(0xe3520000)  # cmp  r2, #0
-    b("status_inited", cond=0x1)  # bne
-    insns.append(0xe3a00000)  # mov  r0, #0
-    insns.append(0xe3a01000)  # mov  r1, #0
-    mark("zero_st_loop")
-    insns.append(0xe7880001)  # str  r0, [r8, r1]
-    insns.append(0xe2811004)  # add  r1, r1, #4
-    insns.append(0xe3510020)  # cmp  r1, #0x20
-    b("zero_st_loop", cond=0xb)  # blt
-    insns.append(0xe3a02001)  # mov  r2, #1
-    insns.append(0xe5c4213e)  # strb r2, [r4, #0x13e]
+    if post_update:
+        # No FD-byte initialization, writes to FD objects, or mutex operations
+        # here. A separate boot hook initializes the probe storage.
+        insns.append(0xe5982018)  # ldr r2, [r8, #0x18]
+        ldr32(3, CONTINUITY_COOKIE)
+        insns.append(0xe1520003)  # cmp r2, r3
+        b("exit_done", cond=0x1)
+    else:
+        insns.append(0xe5d4213e)  # ldrb r2, [r4, #0x13e]
+        insns.append(0xe3520000)  # cmp  r2, #0
+        b("status_inited", cond=0x1)  # bne
+        insns.append(0xe3a00000)  # mov  r0, #0
+        insns.append(0xe3a01000)  # mov  r1, #0
+        mark("zero_st_loop")
+        insns.append(0xe7880001)  # str  r0, [r8, r1]
+        insns.append(0xe2811004)  # add  r1, r1, #4
+        insns.append(0xe3510020)  # cmp  r1, #0x20
+        b("zero_st_loop", cond=0xb)  # blt
+        insns.append(0xe3a02001)  # mov  r2, #1
+        insns.append(0xe5c4213e)  # strb r2, [r4, #0x13e]
 
-    mark("status_inited")
-    # Unlock FaceDetectionService mutex BEFORE any DSP/SD operations
-    unlock_fd_mutex()
+        mark("status_inited")
+        # Unlock FaceDetectionService mutex BEFORE any DSP/SD operations
+        unlock_fd_mutex()
 
     # Check state in [STATUS_VA + 0]
     insns.append(0xe5987000)  # ldr  r7, [r8, #0] (state)
@@ -100,6 +115,10 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
     b("do_poll_in_flight", cond=0x0)
     insns.append(0xe3570002)  # cmp  r7, #2 (SEND_ONCE)
     b("do_send_probe", cond=0x0)
+    if post_update:
+        # Only cold state (0) may load/start. All unknown states fail closed.
+        insns.append(0xe3570000)
+        b("exit_done", cond=0x1)
 
     # --- States 0 / 1: Warmup & Non-blocking retry LoadDsp + Start ---
     insns.append(0xe5982004)  # ldr  r2, [r8, #4] (boot_ticks)
@@ -114,6 +133,9 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
 
     # Get or create DspService
     call(s3.GET_DSP_SVC_VA)
+    if post_update:
+        insns.append(0xe3500000)
+        b("halt_uncertain", cond=0x0)
     insns.append(0xe5905004)  # ldr  r5, [r0, #4]
     insns.append(0xe3550000)  # cmp  r5, #0
     b("have_svc_init", cond=0x1)
@@ -125,6 +147,10 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
     b("show_load_err", cond=0x0)
 
     mark("have_svc_init")
+    if post_update:
+        # Do not load a second image over an already-running native service.
+        insns.extend((0xe5952004, 0xe3120004))
+        b("halt_uncertain", cond=0x1)
     # Try Drive 'C' then 'I'
     insns.append(0xe1a00005)  # mov  r0, r5
     insns.append(0xe3a01043)  # mov  r1, #'C'
@@ -142,9 +168,10 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
     insns.append(0xe3500000)
     b("load_ok", cond=0x1)
 
-    # Load failed
-    insns.append(0xe3a02000)
-    insns.append(0xe5852004)  # clear false loaded bit
+    # Load failed. Post-update mode does not reset fields in the stock object.
+    if not post_update:
+        insns.append(0xe3a02000)
+        insns.append(0xe5852004)  # clear false loaded bit
     insns.append(0xe3a00001)
     insns.append(0xe5880000)  # state = 1
     b("show_load_err")
@@ -164,6 +191,8 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
     b("show_start_err")
 
     mark("start_ok")
+    if post_update:
+        insns.append(0xe5885020)  # bind subsequent requests to this service
     insns.append(0xe3a00002)  # state = 2 (SEND_ONCE)
     insns.append(0xe5880000)
     b("show_warmup")  # yield 1 frame before first SendMessage
@@ -171,7 +200,10 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
     # --- State 2: Prepare deterministic synthetic input + canary output + SendMessage ---
     mark("do_send_probe")
     call(s3.GET_DSP_SVC_VA)
-    insns.append(0xe5905004)  # r5 = m_dspService
+    if post_update:
+        b("check_started_service", bl=True)
+    else:
+        insns.append(0xe5905004)  # r5 = m_dspService
 
     # Fill TENSOR_IN_VA (0x52b00000, size 0x2a00) with 0x80 neutral pattern,
     # and TENSOR_OUT_VA (0x52b02a00, size 0x5400) with 0x55555555 canary
@@ -191,10 +223,14 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
     insns.append(0xe7801002)
     b("fill_out_loop", cond=0x1)
 
-    # Flush ARM D-Cache for 0x52b00000, size 0xee00
+    # Publish exactly the CPU-written input and canary in post-update mode.
+    # The legacy Step 2A paired build kept a broader 0xee00 flush.
     call(s3.GET_CACHE_MGR_VA)
     ldr32(1, s3.TENSOR_IN_VA)
-    insns.append(0xe3a02cee)  # mov r2, #0xee00
+    if post_update:
+        insns.append(s3.encode_movw(2, 0x2a00 + 0x5400))
+    else:
+        insns.append(0xe3a02cee)  # mov r2, #0xee00
     call(s3.FLUSH_DCACHE_VA)
 
     # Populate 10-word DspCommandParameter @ TENSOR_MSG_VA (0x52c00000)
@@ -244,11 +280,31 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
 
     # --- State 3: Non-blocking WaitMessage(..., timeout=0) ---
     mark("do_poll_in_flight")
+    if post_update:
+        # Delay the sole wait attempt; the vendor wrapper has side effects
+        # even on a timeout, so never repeatedly call it as a readiness query.
+        insns.extend((0xe598200c, 0xe2822001, 0xe588200c,
+                      0xe3520000 | CONTINUITY_WAIT_FRAMES))
+        b("exit_done", cond=0x3)  # blo
     call(s3.GET_DSP_SVC_VA)
-    insns.append(0xe5905004)  # r5 = svc
+    if post_update:
+        b("check_started_service", bl=True)
+        # Stock 0x5398e718 copies 0x24 B to reply+4 only on a matching
+        # occupied slot. WaitMessage itself masks that helper's error.
+        ldr32(3, RESP_BUF_VA + 4)
+        ldr32(2, CONTINUITY_REPLY_MARK)
+        insns.append(0xe3a00024)
+        mark("prime_reply_marker")
+        insns.extend((0xe2500004, 0xe7832000))  # subs r0,#4; str r2,[r3,r0]
+        b("prime_reply_marker", cond=0x1)
+    else:
+        insns.append(0xe5905004)  # r5 = svc
     insns.append(0xe2886008)  # r6 = STATUS_VA + 8
     insns.append(0xe1a00005)  # r0 = svc
     insns.append(0xe1d610b0)  # r1 = seq
+    if post_update:
+        insns.append(0xe3510005)  # stock sequence domain 0..5
+        b("halt_uncertain", cond=0x8)  # bhi
     insns.append(0xe3a02000)  # r2 = 0 (NON-BLOCKING TMO_POL!)
     ldr32(3, RESP_BUF_VA)
     call(s3.WAIT_MSG_VA)
@@ -256,13 +312,29 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
     insns.append(0xe3500000)
     b("wait_got_reply", cond=0x0)
 
-    # Still pending (-3)
-    insns.append(0xe598200c)  # poll_frames++
-    insns.append(0xe2822001)
-    insns.append(0xe588200c)
-    b("show_in_flight")
+    if post_update:
+        b("halt_uncertain")
+    else:
+        # Still pending (-3), legacy single-shot behavior.
+        insns.append(0xe598200c)  # poll_frames++
+        insns.append(0xe2822001)
+        insns.append(0xe588200c)
+        b("show_in_flight")
 
     mark("wait_got_reply")
+    if post_update:
+        # Require evidence of a copied response, not just an event flag and
+        # WaitMessage==0. Compare all nine reply words to the prefill marker.
+        ldr32(0, RESP_BUF_VA + 4)
+        ldr32(1, CONTINUITY_REPLY_MARK)
+        insns.append(0xe3a02024)
+        mark("check_reply_marker")
+        insns.extend((0xe2522004, 0xe7903002, 0xe1530001))
+        b("reply_copied", cond=0x1)
+        insns.append(0xe3520000)
+        b("check_reply_marker", cond=0x1)
+        b("halt_uncertain")
+        mark("reply_copied")
     # Invalidate ARM D-Cache on TENSOR_OUT_VA (0x52b02a00, size 0x5400)
     call(s3.GET_CACHE_MGR_VA)
     ldr32(1, s3.TENSOR_OUT_VA)
@@ -285,7 +357,12 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
     insns.append(0xe5883014)  # canary_diff_cnt
     insns.append(0xe3530000)
     b("done_no_write", cond=0x0)
-    insns.append(0xe3a00004)  # state = 4 (DONE_OK)
+    if post_update:
+        insns.extend((0xe598201c, 0xe2822001, 0xe588201c,
+                      0xe3520000 | CONTINUITY_BUDGET,
+                      0x33a00002, 0x23a00004))  # blo SEND next frame; bhs DONE
+    else:
+        insns.append(0xe3a00004)  # state = 4 (DONE_OK)
     insns.append(0xe5880000)
     b("show_done_ok")
 
@@ -294,110 +371,133 @@ def build_step2a_cave2_payload(cave_va: int = s3.CAVE2_VA) -> bytes:
     insns.append(0xe5880000)
     b("show_done_no_write")
 
-    # --- Visual Telemetry Coordinates (px -> Q8 below) ---
-    mark("show_warmup")
-    insns.append(0xe3a07010)  # x = 16
-    insns.append(0xe3a08010)  # y = 16
-    b("render_box")
+    if post_update:
+        # Confirm the service pointer is still non-null, unchanged and started.
+        # Fail directly to the shared epilogue; the core has already saved LR.
+        mark("check_started_service")
+        insns.append(0xe3500000)
+        b("halt_uncertain", cond=0x0)
+        insns.extend((0xe5905004, 0xe3550000))
+        b("halt_uncertain", cond=0x0)
+        insns.extend((0xe5982020, 0xe1550002))
+        b("halt_uncertain", cond=0x1)
+        insns.extend((0xe5952004, 0xe3120004))
+        b("halt_uncertain", cond=0x0)
+        insns.append(0xe12fff1e)  # bx lr
 
-    mark("show_load_err")
-    insns.append(0xe3a07010)  # x = 16
-    insns.append(0xe3a08038)  # y = 56
-    b("render_box")
+        mark("halt_uncertain")
+        insns.extend((0xe3a00008, 0xe5880000))
+        for label in ("show_warmup", "show_load_err", "show_start_err", "show_send_err",
+                      "show_in_flight", "show_done_ok", "show_done_no_write"):
+            mark(label)
+    else:
+        # --- Visual Telemetry Coordinates (px -> Q8 below) ---
+        mark("show_warmup")
+        insns.append(0xe3a07010)  # x = 16
+        insns.append(0xe3a08010)  # y = 16
+        b("render_box")
 
-    mark("show_start_err")
-    insns.append(0xe3a07010)  # x = 16
-    insns.append(0xe3a08060)  # y = 96
-    b("render_box")
+        mark("show_load_err")
+        insns.append(0xe3a07010)  # x = 16
+        insns.append(0xe3a08038)  # y = 56
+        b("render_box")
 
-    mark("show_send_err")
-    insns.append(0xe3a07010)  # x = 16
-    insns.append(0xe3a08088)  # y = 136
-    b("render_box")
+        mark("show_start_err")
+        insns.append(0xe3a07010)  # x = 16
+        insns.append(0xe3a08060)  # y = 96
+        b("render_box")
 
-    mark("show_in_flight")
-    # x = 64 + min(poll_frames, 200), y = 56
-    insns.append(0xe598200c)  # r2 = poll_frames
-    insns.append(0xe35200c8)  # cmp r2, #200
-    insns.append(0xc3a020c8)  # movgt r2, #200
-    insns.append(0xe2827040)  # add r7, r2, #64
-    insns.append(0xe3a08038)  # y = 56
-    b("render_box")
+        mark("show_send_err")
+        insns.append(0xe3a07010)  # x = 16
+        insns.append(0xe3a08088)  # y = 136
+        b("render_box")
 
-    mark("show_done_ok")
-    # x = 220 + min(poll_frames, 15)*4, y = 96
-    insns.append(0xe598200c)
-    insns.append(0xe352000f)  # cmp r2, #15
-    insns.append(0xc3a0200f)  # movgt r2, #15
-    insns.append(0xe3a070dc)  # mov r7, #220
-    insns.append(0xe0877102)  # add r7, r7, r2, lsl #2
-    insns.append(0xe3a08060)  # y = 96
-    b("render_box")
+        mark("show_in_flight")
+        # x = 64 + min(poll_frames, 200), y = 56
+        insns.append(0xe598200c)  # r2 = poll_frames
+        insns.append(0xe35200c8)  # cmp r2, #200
+        insns.append(0xc3a020c8)  # movgt r2, #200
+        insns.append(0xe2827040)  # add r7, r2, #64
+        insns.append(0xe3a08038)  # y = 56
+        b("render_box")
 
-    mark("show_done_no_write")
-    insns.append(0xe3a070dc)  # x = 220
-    insns.append(0xe3a08088)  # y = 136
+        mark("show_done_ok")
+        # x = 220 + min(poll_frames, 15)*4, y = 96
+        insns.append(0xe598200c)
+        insns.append(0xe352000f)  # cmp r2, #15
+        insns.append(0xc3a0200f)  # movgt r2, #15
+        insns.append(0xe3a070dc)  # mov r7, #220
+        insns.append(0xe0877102)  # add r7, r7, r2, lsl #2
+        insns.append(0xe3a08060)  # y = 96
+        b("render_box")
 
-    # --- Render Step-1-verified 32x32 Q8 Box & Re-lock Mutex ---
-    mark("render_box")
-    lock_fd_mutex()
+        mark("show_done_no_write")
+        insns.append(0xe3a070dc)  # x = 220
+        insns.append(0xe3a08088)  # y = 136
 
-    insns.append(0xe1a07407)  # lsl r7, r7, #8 (left Q8)
-    insns.append(0xe1a08408)  # lsl r8, r8, #8 (top Q8)
-    insns.append(s3.encode_movw(5, 0x2000))  # box_size = 32 px in Q8 (> 0x1e00 floor)
+        # --- Render Step-1-verified 32x32 Q8 Box & Re-lock Mutex ---
+        mark("render_box")
+        lock_fd_mutex()
 
-    insns.append(0xe594a078)  # ldr sl, [r4, #0x78]
-    insns.append(0xe35a0000)
-    b("exit_done", cond=0x0)
+        insns.append(0xe1a07407)  # lsl r7, r7, #8 (left Q8)
+        insns.append(0xe1a08408)  # lsl r8, r8, #8 (top Q8)
+        insns.append(s3.encode_movw(5, 0x2000))  # box_size = 32 px in Q8 (> 0x1e00 floor)
 
-    # Zero 100 bytes of m_DetectedFaceResult[0]
-    insns.append(0xe3a00000)
-    insns.append(0xe3a01000)
-    mark("zero_face_loop")
-    insns.append(0xe78a0001)
-    insns.append(0xe2811004)
-    insns.append(0xe3510064)
-    b("zero_face_loop", cond=0xb)
+        insns.append(0xe594a078)  # ldr sl, [r4, #0x78]
+        insns.append(0xe35a0000)
+        b("exit_done", cond=0x0)
 
-    insns.append(0xe58a7000)  # left
-    insns.append(0xe58a8004)  # top
-    insns.append(0xe58a5008)  # width
-    insns.append(0xe58a500c)  # height
-    insns.append(s3.encode_movw(9, 95))
-    insns.append(0xe58a904c)  # score = 95
-    insns.append(0xe5941118)
-    insns.append(0xe3510000)
-    insns.append(0x03a01001)
-    insns.append(0xe58a1050)  # face_id
+        # Zero 100 bytes of m_DetectedFaceResult[0]
+        insns.append(0xe3a00000)
+        insns.append(0xe3a01000)
+        mark("zero_face_loop")
+        insns.append(0xe78a0001)
+        insns.append(0xe2811004)
+        insns.append(0xe3510064)
+        b("zero_face_loop", cond=0xb)
 
-    # Seed tracking state
-    insns.append(0xe08720a5)
-    insns.append(0xe5842100)  # cx
-    insns.append(0xe08820a5)
-    insns.append(0xe5842104)  # cy
-    insns.append(0xe5845108)  # prev_w
-    insns.append(0xe584510c)  # prev_h
-    insns.append(0xe5841118)
-    insns.append(0xe584111c)
-    insns.append(0xe3a02001)
-    insns.append(0xe5c4213c)  # tracking_active = 1
-    insns.append(0xe3a00000)
-    insns.append(0xe5c40121)  # is_stabilizing = 0
-    insns.append(0xe2843f49)
-    insns.append(0xe1c300b0)  # lost_frames_counter = 0
+        insns.append(0xe58a7000)  # left
+        insns.append(0xe58a8004)  # top
+        insns.append(0xe58a5008)  # width
+        insns.append(0xe58a500c)  # height
+        insns.append(s3.encode_movw(9, 95))
+        insns.append(0xe58a904c)  # score = 95
+        insns.append(0xe5941118)
+        insns.append(0xe3510000)
+        insns.append(0x03a01001)
+        insns.append(0xe58a1050)  # face_id
 
-    insns.append(0xe5943038)  # FdLibraryService*
-    insns.append(0xe3530000)
-    b("exit_done", cond=0x0)
-    insns.append(0xe3a01001)
-    insns.append(0xe5831030)  # face_count = 1
-    insns.append(0xe3a01000)
-    insns.append(0xe5831034)  # main_face_idx = 0
+        # Seed tracking state
+        insns.append(0xe08720a5)
+        insns.append(0xe5842100)  # cx
+        insns.append(0xe08820a5)
+        insns.append(0xe5842104)  # cy
+        insns.append(0xe5845108)  # prev_w
+        insns.append(0xe584510c)  # prev_h
+        insns.append(0xe5841118)
+        insns.append(0xe584111c)
+        insns.append(0xe3a02001)
+        insns.append(0xe5c4213c)  # tracking_active = 1
+        insns.append(0xe3a00000)
+        insns.append(0xe5c40121)  # is_stabilizing = 0
+        insns.append(0xe2843f49)
+        insns.append(0xe1c300b0)  # lost_frames_counter = 0
+
+        insns.append(0xe5943038)  # FdLibraryService*
+        insns.append(0xe3530000)
+        b("exit_done", cond=0x0)
+        insns.append(0xe3a01001)
+        insns.append(0xe5831030)  # face_count = 1
+        insns.append(0xe3a01000)
+        insns.append(0xe5831034)  # main_face_idx = 0
 
     mark("exit_done")
     insns.append(0xe28dd008)  # add sp, sp, #8
-    insns.append(0xe8bd47f0)  # pop {r4, r5, r6, r7, r8, sb, sl, lr}
-    insns.append(s3.encode_arm_branch(cave_va + len(insns) * 4, s3.HOOK2_AI_RESUME_VA))
+    if post_update:
+        insns.append(0xe8bd87f0)  # pop {r4-r10, pc}
+    else:
+        insns.append(0xe8bd47f0)  # pop {r4, r5, r6, r7, r8, sb, sl, lr}
+        insns.append(s3.encode_arm_branch(cave_va + len(insns) * 4, s3.HOOK2_AI_RESUME_VA))
 
     for idx, target, is_bl, cond in relocs:
         insns[idx] = s3.encode_arm_branch(cave_va + idx * 4, labels[target], is_bl=is_bl, cond=cond)
