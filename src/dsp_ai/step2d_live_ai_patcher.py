@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Step 2D v1.2.17: Live-frame continuous CEVA-XM4 AI subject-tracking AF (Option B).
+"""Step 2D v1.2.18: K-3 III official softmax, priority, orientation & local centroid AI AF (Option B).
 
-Builds on the real-hardware-verified v1.2.15 OSD-commit-first architecture and
-Pentax K-3 III Start -> SendMessage(4) -> 0x1f/Slot-Poll -> WaitMessage(0) -> Stop(100)
-lifecycle, adding:
-- Live GR IV AHIP YUV420 frame extraction (*([0x55081350 + 0x424]), Y@+0x04, U@+0x08, V@+0x0c)
-  with strict null, GR IV DDR-range (0x40000000..0xe0000000 covering RTOS, IMAGE1, and IMAGE2),
-  dimension, and D-Cache guards;
-- Pixel-center BT.601 YUV420 -> 56x56 (stride 64) planar RGB downsampler into 0x52b00000;
-- True K-3 III 3-channel 56x56 int16_t (Q2) segmentation heatmap scanner at 0x52b09a00
-  (Ch0 background, Ch1 human/head priority, Ch2 animal/body);
-- Dynamic Q8 box sizing, EMA smoothing, 3-cycle lost-frame hold, and Option B clean box
-  hiding (face_count = 0) when no subject is present.
+Builds on the real-hardware-verified v1.2.15 OSD-commit-first lifecycle and v1.2.17
+AHIP IMAGE2 live-frame pipeline, porting Pentax K-3 Mark III v2.20's exact official
+3-channel heatmap rules and tracking behavior:
+- Lock-free gravity posture read via GR IV CameraPostureService (0x5537B298 / 0x5537B2A0
+  -> [+0x518] -> [0] + 0xd8) with DDR range guards, rotating the 56x56 planar RGB input
+  upright using K-3 III's exact (start, c_step, r_step) tables (0x539323d4/2278/2290);
+- Exact 3-class softmax via 16-byte exp(-0.25*d)*256 LUT @ EXP_LUT_VA (0x53001FF0):
+  - Strict Tier 1 (Ch1 Head/Face/Cat Face): P(Ch1) > 50% (other <= 255), peak >= 60%
+    (other <= 170), >= 3 cells in +-9 local cluster; strictly blocks Tier 2 when hit;
+  - Strict Tier 2 (Ch2 Body/Back/Profile fallback): P(Ch2) > 75% (other <= 85),
+    >= 6 cells in +-10 local cluster;
+- 2-iteration local mean-shift probability-weighted sub-pixel centroid in Q4 (eliminates
+  top-left Q2 plateau tie drift and second-subject interference), inverse-rotated back to
+  sensor coordinates;
+- Tight local-span box sizing (head 30..56 px, body 36..60 px), 2-cycle cold confirmation,
+  position/size deadbands (2.5 px / 3.0 px), smooth EMA, 3-cycle hold + Option B hide.
 """
 
 import struct
@@ -25,12 +30,30 @@ LIVE_AI_COOKIE = 0x41493244  # "AI2D"
 WARMUP_FRAMES = 20
 LOAD_RETRY_MASK = 0x3F       # Retry LoadDsp every 64 frames on cold storage delay
 MAX_POLL_FRAMES = 30
-PEAK_THRESH = 3              # +0.75 logit in Q2 (0.25/LSB)
-AREA_THRESH = 2              # Minimum foreground cells (out of 56x56)
 LOST_HOLD_CYCLES = 3         # Hold box for 3 empty cycles, hide on 4th (Option B)
-MIN_BOX_Q8 = 0x2800          # 40 px in Q8
-MAX_BOX_Q8 = 0x5800          # 88 px in Q8
 
+# GR IV CameraPostureService globals (verified from 0x53750008 / 0x5377b1b0 / 0x537818a8)
+ORIENT_GUARD_VA = 0x5537B298
+ORIENT_SVC_PTR_VA = 0x5537B2A0  # ORIENT_GUARD_VA + 8
+
+# K-3 III exact softmax sensitivity, cluster, sizing, and anti-jitter constants
+CH1_OTHER_MAX = 255          # e0 + e2 <= 255 <=> P(Ch1) > 50% (#0x32)
+CH1_PEAK_OTHER_MAX = 170     # e0 + e2 <= 170 <=> peak P(Ch1) >= 60%
+CH1_MIN_LOCAL = 3            # Minimum local +-9 cluster cell count for Ch1 head/face
+CH2_OTHER_MAX = 85           # e0 + e1 <= 85  <=> P(Ch2) > 75% (#0x4b)
+CH2_MIN_LOCAL = 6            # Minimum local +-10 cluster cell count for Ch2 body fallback
+LOCAL_RADIUS_CH1 = 9
+LOCAL_RADIUS_CH2 = 10
+ACQ_CONFIRM_CYCLES = 2       # Cold start has_box 0 -> 1 confirmation cycles
+
+MIN_HEAD_BOX_Q8 = 0x1E00     # 30 px
+MAX_HEAD_BOX_Q8 = 0x3800     # 56 px
+MIN_BODY_BOX_Q8 = 0x2400     # 36 px
+MAX_BODY_BOX_Q8 = 0x3C00     # 60 px
+POS_DEADBAND_Q8 = 0x280      # 2.5 px position deadband
+SIZE_DEADBAND_Q8 = 0x300     # 3.0 px size deadband
+
+STATUS_SIZE = 0x50           # 80 bytes: STATUS_VA + 0x00 .. + 0x4c
 RESP_BUF_VA = s3.TENSOR_MSG_VA + 0x40
 HEATMAP_OUT_VA = s3.TENSOR_IN_VA + 0x9A00   # 0x52b09a00 (true K-3 III 3-ch 56x56 heatmap)
 HEATMAP_LEN = 0x5400                        # 3 * 0x1c00 bytes
@@ -43,8 +66,11 @@ OS_EF_CLEAR_VA = 0x53902FE8  # OsEventFlag::Clear(ef, clrptn)
 HOOK_UPDATE_VA = 0x538963B8
 EXPECTED_UPDATE = bytes.fromhex("8dfdffeb")
 
-CAVE3_VA = 0x530018E0        # Zero cave immediately after DESC_TABLE_VA (ends 0x530018d8)
+CAVE3_VA = 0x530018E0        # Code cave immediately after DESC_TABLE_VA (ends 0x530018d8)
+EXP_LUT_VA = 0x53001FF0      # 16-byte softmax LUT placed cleanly after Cave 3 code
+CAVE3_CODE_LIMIT_VA = EXP_LUT_VA
 CAVE3_LIMIT_VA = 0x53002000  # End of verified contiguous ROM zero cave
+EXP_LUT_BYTES = bytes([255, 199, 155, 121, 94, 73, 57, 44, 35, 27, 21, 16, 13, 10, 8, 6])
 
 
 def _make_asm(base_va: int):
@@ -80,10 +106,9 @@ def _make_asm(base_va: int):
 
 
 def build_live_ai_cave1() -> bytes:
-    """Cave 1 @ 0x53000d60: zero full 64-byte STATUS_VA region on first boot & publish cookie."""
+    """Cave 1 @ 0x53000d60: zero full 80-byte STATUS_VA region on first boot & publish cookie."""
     insns, mark, b, _, jump, ldr32, finalize = _make_asm(s3.CAVE1_VA)
 
-    # Reconstruct LiveViewProcess3aContoller APCS prologue
     insns.extend((
         0xE1A0C00D,  # mov  ip, sp
         0xE92DD8F0,  # push {r4, r5, r6, r7, fp, ip, lr, pc}
@@ -95,22 +120,22 @@ def build_live_ai_cave1() -> bytes:
         0xE5946000,  # ldr  r6, [r4]
         0xE3560000,  # cmp  r6, #0
     ))
-    b("exit", cond=0x1)  # bne .exit
+    b("exit", cond=0x1)
 
     ldr32(3, s3.STATUS_VA)
     insns.extend((
-        0xE3A02000,  # mov  r2, #0
-        0xE3A01040,  # mov  r1, #0x40 (64 bytes = STATUS_VA+0x00..0x3c)
+        0xE3A02000,                # mov  r2, #0
+        0xE3A01000 | STATUS_SIZE,  # mov  r1, #0x50 (80 bytes = STATUS_VA+0x00..0x4c)
     ))
     mark("zero_status_loop")
     insns.extend((
         0xE2511004,  # subs r1, r1, #4
         0xE7832001,  # str  r2, [r3, r1]
     ))
-    b("zero_status_loop", cond=0x1)  # bne .zero_status_loop
+    b("zero_status_loop", cond=0x1)
 
     ldr32(2, LIVE_AI_COOKIE)
-    insns.append(0xE5832018)  # str r2, [r3, #0x18] (publish cookie last)
+    insns.append(0xE5832018)  # str r2, [r3, #0x18]
 
     mark("exit")
     jump(s3.HOOK1_RESUME_VA)
@@ -121,47 +146,40 @@ def build_live_ai_cave1() -> bytes:
     return code
 
 
-def build_live_ai_cave3() -> tuple[bytes, dict[str, int]]:
-    """Cave 3 @ 0x530018e0: AHIP RGB downsampler, 0x52b09a00 heatmap scanner, EMA tracker."""
+def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]]:
+    """Cave 3 @ 0x530018e0..0x53001ff0: AHIP rotated RGB downsampler + K-3 III softmax scanner."""
     insns, mark, b, call, _, ldr32, finalize = _make_asm(CAVE3_VA)
 
     # ---------------------------------------------------------------------
     # 1. sub_sample_ahip_rgb(r0 = fd_obj) -> r0 (1=sampled, 0=skip)
     # ---------------------------------------------------------------------
     mark("sub_sample_ahip_rgb")
-    # 9 regs (36 B) + 20 B locals = 56 B (8-byte aligned)
-    # Locals: [sp+0]=fd_w, [sp+4]=fd_h, [sp+8]=U_ptr, [sp+12]=V_ptr, [sp+16]=uv_row_off
+    # 9 regs (36 B) + 28 B locals = 64 B (8-byte aligned)
     insns.extend((
         0xE92D4FF0,  # push {r4, r5, r6, r7, r8, sb, sl, fp, lr}
-        0xE24DD014,  # sub  sp, sp, #20
+        0xE24DD01C,  # sub  sp, sp, #28
         0xE3500000,  # cmp  r0, #0
     ))
     b("sample_fail", cond=0x0)
 
-    # Read & validate fd_w ([r0,#0xfc]) and fd_h ([r0,#0xfe]): 64..1280, w%8==0, h%4==0
+    # Validate fd_w ([r0,#0xfc]) and fd_h ([r0,#0xfe]): 64..1280, w%8==0, h%4==0
     insns.extend((
-        0xE1D04FBC,  # ldrh r4, [r0, #0xfc] (fd_w)
-        0xE1D05FBE,  # ldrh r5, [r0, #0xfe] (fd_h)
+        0xE1D04FBC,  # ldrh r4, [r0, #0xfc]
+        0xE1D05FBE,  # ldrh r5, [r0, #0xfe]
         0xE3540040,  # cmp  r4, #64
     ))
-    b("sample_fail", cond=0x3)  # blo
+    b("sample_fail", cond=0x3)
     insns.append(0xE3540C05)    # cmp  r4, #0x500 (1280)
-    b("sample_fail", cond=0x8)  # bhi
+    b("sample_fail", cond=0x8)
     insns.append(0xE3140007)    # tst  r4, #7
-    b("sample_fail", cond=0x1)  # bne
+    b("sample_fail", cond=0x1)
     insns.append(0xE3550040)    # cmp  r5, #64
-    b("sample_fail", cond=0x3)  # blo
+    b("sample_fail", cond=0x3)
     insns.append(0xE3550C05)    # cmp  r5, #0x500 (1280)
-    b("sample_fail", cond=0x8)  # bhi
+    b("sample_fail", cond=0x8)
     insns.append(0xE3150003)    # tst  r5, #3
-    b("sample_fail", cond=0x1)  # bne
+    b("sample_fail", cond=0x1)
 
-    insns.extend((
-        0xE58D4000,  # str  r4, [sp, #0]
-        0xE58D5004,  # str  r5, [sp, #4]
-    ))
-
-    # Inspect AHIP driver @ 0x55081350: must be active ([+0x30] == 2)
     ldr32(6, s3.AHIP_DRV_BASE_VA)
     insns.extend((
         0xE5961030,  # ldr  r1, [r6, #0x30]
@@ -169,37 +187,34 @@ def build_live_ai_cave3() -> tuple[bytes, dict[str, int]]:
     ))
     b("sample_fail", cond=0x1)
 
-    # slot_pp = [ahip + 0x424]; check 0x40000000 <= ptr < 0xe0000000 (RTOS + IMAGE1 + IMAGE2)
+    # 5x AHIP DDR-range guards (0x40000000 <= ptr < 0xe0000000)
     insns.extend((
-        0xE5961424,  # ldr  r1, [r6, #0x424]
+        0xE5961424,  # ldr  r1, [r6, #0x424] (slot_pp)
         0xE2412101,  # sub  r2, r1, #0x40000000
         0xE352020A,  # cmp  r2, #0xa0000000
     ))
-    b("sample_fail", cond=0x2)  # bhs
+    b("sample_fail", cond=0x2)
 
-    # slot = [slot_pp]; check DDR range
     insns.extend((
-        0xE5911000,  # ldr  r1, [r1]
+        0xE5911000,  # ldr  r1, [r1] (slot)
         0xE2412101,  # sub  r2, r1, #0x40000000
         0xE352020A,  # cmp  r2, #0xa0000000
     ))
-    b("sample_fail", cond=0x2)  # bhs
+    b("sample_fail", cond=0x2)
 
-    # Y_ptr = [slot + 0x04]; check DDR range
     insns.extend((
-        0xE5917004,  # ldr  r7, [r1, #0x04]
+        0xE5917004,  # ldr  r7, [r1, #0x04] (Y_ptr)
         0xE2472101,  # sub  r2, r7, #0x40000000
         0xE352020A,  # cmp  r2, #0xa0000000
     ))
-    b("sample_fail", cond=0x2)  # bhs
+    b("sample_fail", cond=0x2)
 
-    # U_ptr = [slot + 0x08], V_ptr = [slot + 0x0c] (fallback to 0 -> grayscale if invalid)
     insns.extend((
-        0xE5918008,  # ldr  r8, [r1, #0x08]
+        0xE5918008,  # ldr  r8, [r1, #0x08] (U_ptr)
         0xE2482101,  # sub  r2, r8, #0x40000000
         0xE352020A,  # cmp  r2, #0xa0000000
         0x23A08000,  # movhs r8, #0
-        0xE591900C,  # ldr  sb, [r1, #0x0c]
+        0xE591900C,  # ldr  sb, [r1, #0x0c] (V_ptr)
         0xE2492101,  # sub  r2, sb, #0x40000000
         0xE352020A,  # cmp  r2, #0xa0000000
         0x23A09000,  # movhs sb, #0
@@ -209,85 +224,142 @@ def build_live_ai_cave3() -> tuple[bytes, dict[str, int]]:
 
     # Invalidate ARM D-Cache for live YUV420 slot before CPU reads
     insns.extend((
-        0xE0030594,  # mul  r3, r4, r5 (min_size = fd_w * fd_h)
-        0xE596100C,  # ldr  r1, [r6, #0x0c] (AHIP slot total size)
+        0xE0030594,  # mul  r3, r4, r5
+        0xE596100C,  # ldr  r1, [r6, #0x0c]
         0xE1510003,  # cmp  r1, r3
     ))
-    b("use_default_sz", cond=0x3)  # blo
-    insns.append(0xE3510502)       # cmp  r1, #0x00800000 (8 MB cap)
-    b("have_total_sz", cond=0x9)   # bls
+    b("use_default_sz", cond=0x3)
+    insns.append(0xE3510502)       # cmp  r1, #0x00800000
+    b("have_total_sz", cond=0x9)
     mark("use_default_sz")
-    insns.append(0xE08310A3)       # add  r1, r3, r3, lsr #1 (1.5 * fd_w * fd_h)
+    insns.append(0xE08310A3)       # add  r1, r3, r3, lsr #1
     mark("have_total_sz")
     insns.append(0xE1A0A001)       # mov  sl, r1
     call(s3.GET_CACHE_MGR_VA)
     insns.extend((
-        0xE1A01007,  # mov  r1, r7 (Y_ptr)
-        0xE1A0200A,  # mov  r2, sl (total_size)
+        0xE1A01007,  # mov  r1, r7
+        0xE1A0200A,  # mov  r2, sl
     ))
     call(s3.INVAL_DCACHE_VA)
 
-    # Pixel-center BT.601 YUV420 -> 56x56 (stride 64) planar RGB @ TENSOR_IN_VA
-    # r4=fd_w, r5=fd_h, r7=Y_ptr, fp=TENSOR_IN_VA, r6=row (0..55)
-    ldr32(11, s3.TENSOR_IN_VA)
-    insns.append(0xE3A06000)  # mov r6, #0 (row = 0)
+    # Lock-free live gravity posture read with 3 DDR range guards -> K-3 III upright rotation
+    ldr32(8, s3.STATUS_VA)
+    insns.extend((
+        0xE5980040,  # ldr   r0, [r8, #0x40] (last_orient)
+        0xE3500003,  # cmp   r0, #3
+        0x83A00000,  # movhi r0, #0
+    ))
+    ldr32(1, ORIENT_GUARD_VA)      # ORIENT_SVC_PTR_VA == ORIENT_GUARD_VA + 8
+    insns.extend((
+        0xE5913000,  # ldr  r3, [r1]
+        0xE3130001,  # tst  r3, #1
+    ))
+    b("orient_keep", cond=0x0)
+    insns.extend((
+        0xE5911008,  # ldr  r1, [r1, #8] (svc @ 0x5537B2A0)
+        0xE2412101,  # sub  r2, r1, #0x40000000
+        0xE352020A,  # cmp  r2, #0xa0000000
+    ))
+    b("orient_keep", cond=0x2)
+    insns.extend((
+        0xE5911518,  # ldr  r1, [r1, #0x518] (obj)
+        0xE2412101,  # sub  r2, r1, #0x40000000
+        0xE352020A,  # cmp  r2, #0xa0000000
+    ))
+    b("orient_keep", cond=0x2)
+    insns.extend((
+        0xE5911000,  # ldr  r1, [r1] (buf)
+        0xE2412101,  # sub  r2, r1, #0x40000000
+        0xE352020A,  # cmp  r2, #0xa0000000
+    ))
+    b("orient_keep", cond=0x2)
+    insns.extend((
+        0xE5D130D8,  # ldrb r3, [r1, #0xd8] (raw posture)
+        0xE3530003,  # cmp  r3, #3 (preserve last_orient on TU/TD/--)
+        0x91A00003,  # movls r0, r3
+        0x95880040,  # strls r0, [r8, #0x40]
+    ))
+    mark("orient_keep")
+    insns.extend((
+        0xE5880044,  # str  r0, [r8, #0x44] (in_flight_orient)
+        0xE3A06000,  # mov  r6, #0   (orient 0: start=0, c=+1, r=+64)
+        0xE3A01001,  # mov  r1, #1
+        0xE3A02040,  # mov  r2, #64
+        0xE3500001,  # cmp  r0, #1
+        s3.encode_movw(6, 3520, cond=0x0),
+        0x03E0103F,  # mvneq r1, #63         (-64)
+        0x03A02001,  # moveq r2, #1
+        0xE3500002,  # cmp  r0, #2
+        s3.encode_movw(6, 3575, cond=0x0),
+        0x03E01000,  # mvneq r1, #0          (-1)
+        0x03E0203F,  # mvneq r2, #63         (-64)
+        0xE3500003,  # cmp  r0, #3
+        0x03A06037,  # moveq r6, #55
+        0x03A01040,  # moveq r1, #64
+        0x03E02000,  # mvneq r2, #0          (-1)
+        0xE58D1014,  # str  r1, [sp, #20] (c_step)
+        0xE58D2018,  # str  r2, [sp, #24] (r_step)
+    ))
+
+    # Pixel-center BT.601 YUV420 -> rotated upright 56x56 (stride 64) planar RGB @ TENSOR_IN_VA
+    ldr32(9, s3.TENSOR_IN_VA)
+    insns.extend((
+        0xE0899006,  # add  sb, sb, r6
+        0xE3A06000,  # mov  r6, #0
+    ))
 
     mark("ds_row_loop")
     insns.extend((
-        0xE0860006,  # add  r0, r6, r6       (2*row)
-        0xE2800001,  # add  r0, r0, #1       (2*row + 1)
-        0xE0000095,  # mul  r0, r5, r0       ((2*row + 1) * fd_h)
+        0xE0860006,  # add  r0, r6, r6
+        0xE2800001,  # add  r0, r0, #1
+        0xE0000095,  # mul  r0, r5, r0
         0xE3A01049,  # mov  r1, #73
-        0xE0000091,  # mul  r0, r1, r0       (* 73)
-        0xE1A006A0,  # lsr  r0, r0, #13      (src_y)
-        0xE0287490,  # mla  r8, r0, r4, r7   (y_row_ptr = Y_ptr + src_y * fd_w)
-        0xE1A010A0,  # lsr  r1, r0, #1       (uv_y = src_y >> 1)
-        0xE1A020A4,  # lsr  r2, r4, #1       (uv_w = fd_w >> 1)
-        0xE0010192,  # mul  r1, r2, r1       (uv_row_off = uv_y * uv_w)
+        0xE0000091,  # mul  r0, r1, r0
+        0xE1A006A0,  # lsr  r0, r0, #13
+        0xE0287490,  # mla  r8, r0, r4, r7
+        0xE1A010A0,  # lsr  r1, r0, #1
+        0xE1A020A4,  # lsr  r2, r4, #1
+        0xE0010192,  # mul  r1, r2, r1
         0xE58D1010,  # str  r1, [sp, #16]
-        0xE08B9306,  # add  sb, fp, r6, lsl #6 (dst_row_ptr = TENSOR_IN_VA + row * 64)
+        0xE1A0B009,  # mov  fp, sb           (dst_px_ptr)
         0xE3A0A000,  # mov  sl, #0           (col = 0)
     ))
 
     mark("ds_col_loop")
     insns.extend((
-        0xE08A000A,  # add  r0, sl, sl       (2*col)
-        0xE2800001,  # add  r0, r0, #1       (2*col + 1)
-        0xE0000094,  # mul  r0, r4, r0       ((2*col + 1) * fd_w)
+        0xE08A000A,  # add  r0, sl, sl
+        0xE2800001,  # add  r0, r0, #1
+        0xE0000094,  # mul  r0, r4, r0
         0xE3A01049,  # mov  r1, #73
-        0xE0000091,  # mul  r0, r1, r0       (* 73)
-        0xE1A006A0,  # lsr  r0, r0, #13      (src_x)
-        0xE7D81000,  # ldrb r1, [r8, r0]     (Y)
-        0xE59D2008,  # ldr  r2, [sp, #8]     (U_ptr)
-        0xE59D300C,  # ldr  r3, [sp, #12]    (V_ptr)
+        0xE0000091,  # mul  r0, r1, r0
+        0xE1A006A0,  # lsr  r0, r0, #13
+        0xE7D81000,  # ldrb r1, [r8, r0]
+        0xE59D2008,  # ldr  r2, [sp, #8]
+        0xE59D300C,  # ldr  r3, [sp, #12]
         0xE3520000,  # cmp  r2, #0
     ))
     b("ds_gray", cond=0x0)
-    insns.append(0xE3530000)  # cmp r3, #0
+    insns.append(0xE3530000)
     b("ds_gray", cond=0x0)
 
-    # Pure BT.601 YUV420 -> RGB
     insns.extend((
-        0xE59DC010,  # ldr  ip, [sp, #16]         (uv_row_off)
-        0xE08CC0A0,  # add  ip, ip, r0, lsr #1    (uv_idx = uv_row_off + (src_x >> 1))
-        0xE7D2200C,  # ldrb r2, [r2, ip]          (U_raw)
-        0xE7D3300C,  # ldrb r3, [r3, ip]          (V_raw)
-        0xE2422080,  # sub  r2, r2, #128          (u = U_raw - 128)
-        0xE2433080,  # sub  r3, r3, #128          (v = V_raw - 128)
-        # R = usat8(Y + v + (v >> 1) - (v >> 3))  [1.375*v vs exact 1.402*v]
+        0xE59DC010,  # ldr  ip, [sp, #16]
+        0xE08CC0A0,  # add  ip, ip, r0, lsr #1
+        0xE7D2200C,  # ldrb r2, [r2, ip]
+        0xE7D3300C,  # ldrb r3, [r3, ip]
+        0xE2422080,  # sub  r2, r2, #128
+        0xE2433080,  # sub  r3, r3, #128
         0xE08300C3,  # add  r0, r3, r3, asr #1
         0xE04001C3,  # sub  r0, r0, r3, asr #3
         0xE0810000,  # add  r0, r1, r0
         0xE6E80010,  # usat r0, #8, r0
-        # G = usat8(Y - ((11*u + 23*v) >> 5))     [0.34375*u + 0.71875*v]
-        0xE082C082,  # add  ip, r2, r2, lsl #1    (3*u)
-        0xE08CC182,  # add  ip, ip, r2, lsl #3    (11*u)
-        0xE063E183,  # rsb  lr, r3, r3, lsl #3    (7*v)
-        0xE08EE203,  # add  lr, lr, r3, lsl #4    (23*v)
-        0xE08CC00E,  # add  ip, ip, lr            (11*u + 23*v)
+        0xE082C082,  # add  ip, r2, r2, lsl #1
+        0xE08CC182,  # add  ip, ip, r2, lsl #3
+        0xE063E183,  # rsb  lr, r3, r3, lsl #3
+        0xE08EE203,  # add  lr, lr, r3, lsl #4
+        0xE08CC00E,  # add  ip, ip, lr
         0xE041C2CC,  # sub  ip, r1, ip, asr #5
         0xE6E8C01C,  # usat ip, #8, ip
-        # B = usat8(Y + u + (u >> 1) + (u >> 2))  [1.75*u vs exact 1.772*u]
         0xE082E0C2,  # add  lr, r2, r2, asr #1
         0xE08E2142,  # add  r2, lr, r2, asr #2
         0xE0812002,  # add  r2, r1, r2
@@ -297,251 +369,451 @@ def build_live_ai_cave3() -> tuple[bytes, dict[str, int]]:
 
     mark("ds_gray")
     insns.extend((
-        0xE1A00001,  # mov  r0, r1 (R = Y)
-        0xE1A0C001,  # mov  ip, r1 (G = Y)
-        0xE1A02001,  # mov  r2, r1 (B = Y)
+        0xE1A00001,
+        0xE1A0C001,
+        0xE1A02001,
     ))
 
     mark("ds_store_rgb")
     insns.extend((
-        0xE089300A,  # add  r3, sb, sl            (dst_row_ptr + col)
-        0xE5C30000,  # strb r0, [r3, #0]          (Plane 0: R @ +0x0000)
-        0xE5C3CE00,  # strb ip, [r3, #0xe00]      (Plane 1: G @ +0x0e00)
-        0xE2833C0E,  # add  r3, r3, #0xe00
-        0xE5C32E00,  # strb r2, [r3, #0xe00]      (Plane 2: B @ +0x1c00)
-        0xE28AA001,  # add  sl, sl, #1            (col++)
+        0xE5CB0000,  # strb r0, [fp, #0]
+        0xE5CBCE00,  # strb ip, [fp, #0xe00]
+        0xE28B3C0E,  # add  r3, fp, #0xe00
+        0xE5C32E00,  # strb r2, [r3, #0xe00]
+        0xE59D0014,  # ldr  r0, [sp, #20]
+        0xE08BB000,  # add  fp, fp, r0
+        0xE28AA001,  # add  sl, sl, #1
         0xE35A0038,  # cmp  sl, #56
     ))
-    b("ds_col_loop", cond=0xB)  # blt
+    b("ds_col_loop", cond=0xB)
 
-    # Zero 8-byte stride padding (cols 56..63) in all 3 planes
     insns.extend((
-        0xE3A00000,  # mov  r0, #0
-        0xE5890038,  # str  r0, [sb, #0x38]
-        0xE589003C,  # str  r0, [sb, #0x3c]
-        0xE2899C0E,  # add  sb, sb, #0xe00
-        0xE5890038,  # str  r0, [sb, #0x38]
-        0xE589003C,  # str  r0, [sb, #0x3c]
-        0xE2899C0E,  # add  sb, sb, #0xe00
-        0xE5890038,  # str  r0, [sb, #0x38]
-        0xE589003C,  # str  r0, [sb, #0x3c]
-        0xE2866001,  # add  r6, r6, #1            (row++)
+        0xE59D0018,  # ldr  r0, [sp, #24]
+        0xE0899000,  # add  sb, sb, r0
+        0xE2866001,  # add  r6, r6, #1
         0xE3560038,  # cmp  r6, #56
     ))
-    b("ds_row_loop", cond=0xB)  # blt
+    b("ds_row_loop", cond=0xB)
 
-    # Clear 0x52b09a00..0x52b0edff (0x5400 B) before DSP DMA so stale heatmaps cannot linger
+    # Clear cols 56..63 across all 56 CNN rows & 3 planes regardless of orientation
+    ldr32(0, s3.TENSOR_IN_VA)
+    insns.extend((
+        0xE3A01000,
+        0xE3A02038,
+    ))
+    mark("ds_pad_loop")
+    insns.extend((
+        0xE5801038,
+        0xE580103C,
+        0xE2803C0E,
+        0xE5831038,
+        0xE583103C,
+        0xE2833C0E,
+        0xE5831038,
+        0xE583103C,
+        0xE2800040,
+        0xE2522001,
+    ))
+    b("ds_pad_loop", cond=0x1)
+
     ldr32(0, HEATMAP_OUT_VA)
     insns.extend((
-        0xE3A01000,  # mov  r1, #0
+        0xE3A01000,
         s3.encode_movw(2, HEATMAP_LEN),
     ))
     mark("ds_zero_hm")
     insns.extend((
-        0xE2522004,  # subs r2, r2, #4
-        0xE7801002,  # str  r1, [r0, r2]
+        0xE2522004,
+        0xE7801002,
     ))
-    b("ds_zero_hm", cond=0x1)  # bne
+    b("ds_zero_hm", cond=0x1)
 
-    # Flush full work_buf (0x52b00000, 0xee00 B) to DDR for DSP DMA
     call(s3.GET_CACHE_MGR_VA)
     ldr32(1, s3.TENSOR_IN_VA)
     insns.append(s3.encode_movw(2, WORK_BUF_FLUSH_LEN))
     call(s3.FLUSH_DCACHE_VA)
 
     insns.extend((
-        0xE3A00001,  # mov  r0, #1
-        0xE28DD014,  # add  sp, sp, #20
-        0xE8BD8FF0,  # pop  {r4, r5, r6, r7, r8, sb, sl, fp, pc}
+        0xE3A00001,
+        0xE28DD01C,
+        0xE8BD8FF0,
     ))
 
     mark("sample_fail")
     insns.extend((
-        0xE3A00000,  # mov  r0, #0
-        0xE28DD014,  # add  sp, sp, #20
-        0xE8BD8FF0,  # pop  {r4, r5, r6, r7, r8, sb, sl, fp, pc}
+        0xE3A00000,
+        0xE28DD01C,
+        0xE8BD8FF0,
     ))
 
     # ---------------------------------------------------------------------
     # 2. sub_scan_heatmap(r0 = HEATMAP_OUT_VA)
-    #    -> r0=max_diff, r1=best_col, r2=best_row, r3=area_cnt
+    #    -> r0=(tier<<16)|prob_pct (or 0), r1=u_c_q4, r2=u_r_q4,
+    #       r3=(local_cnt<<16)|(span_r<<8)|span_c
     # ---------------------------------------------------------------------
     mark("sub_scan_heatmap")
-    insns.append(0xE92D4FF0)  # push {r4, r5, r6, r7, r8, sb, sl, fp, lr}
-    ldr32(1, 0xFFFF8000)      # r1 = max_diff = -32768 (signed)
+    # 9 regs (36 B) + 68 B locals = 104 B (8-byte aligned)
+    # Pass 1 locals:
+    #   [sp+0..20]  = t1: margin(-1), other, dist, best_c, best_r, cnt(0)
+    #   [sp+24..44] = t2: margin(-1), other, dist, best_c, best_r, cnt(0)
+    #   [sp+48]=ref_c, [sp+52]=ref_r, [sp+56]=best_other, [sp+60]=row_prev_cnt
     insns.extend((
-        0xE3A0201C,  # mov  r2, #28           (best_col)
-        0xE3A0301C,  # mov  r3, #28           (best_row)
-        0xE3A0B000,  # mov  fp, #0            (area_cnt)
-        0xE2804B07,  # add  r4, r0, #0x1c00   (Ch1: Human/Head)
-        0xE2805B0E,  # add  r5, r0, #0x3800   (Ch2: Animal/Body)
-        0xE3A06000,  # mov  r6, #0            (row = 0)
+        0xE92D4FF0,  # push {r4, r5, r6, r7, r8, sb, sl, fp, lr}
+        0xE24DD044,  # sub  sp, sp, #68
+        0xE1A04000,  # mov  r4, r0             (Ch0 base)
+        0xE2845B07,  # add  r5, r4, #0x1c00    (Ch1 base)
+        0xE2849B0E,  # add  sb, r4, #0x3800    (Ch2 base)
     ))
 
-    mark("hm_row_loop")
+    # Anchor hysteresis: prev_anchor if has_box != 0, else (28, 28)
+    ldr32(0, s3.STATUS_VA)
+    insns.extend((
+        0xE3A0101C,  # mov   r1, #28
+        0xE3A0201C,  # mov   r2, #28
+        0xE5903024,  # ldr   r3, [r0, #0x24]
+        0xE3530000,  # cmp   r3, #0
+        0x1590304C,  # ldrne r3, [r0, #0x4c]
+        0x120310FF,  # andne r1, r3, #0xff
+        0x11A02423,  # lsrne r2, r3, #8
+        0xE3510037,  # cmp   r1, #55
+        0x83A0101C,  # movhi r1, #28
+        0xE3520037,  # cmp   r2, #55
+        0x83A0201C,  # movhi r2, #28
+        0xE58D1030,  # str   r1, [sp, #48]     (ref_c)
+        0xE58D2034,  # str   r2, [sp, #52]     (ref_r)
+        0xE3E00000,  # mvn   r0, #0            (-1: first hit unconditionally wins bgt)
+        0xE3A03000,  # mov   r3, #0
+        0xE58D0000,  # str   r0, [sp, #0]      (t1_margin)
+        0xE58D0018,  # str   r0, [sp, #24]     (t2_margin)
+        0xE58D3014,  # str   r3, [sp, #20]     (t1_cnt = 0)
+        0xE58D302C,  # str   r3, [sp, #44]     (t2_cnt = 0)
+        0xE3A06000,  # mov   r6, #0            (row = 0)
+    ))
+
+    # Unified Pass 1: only strict argmax (c1 > c2 or c2 > c1) can satisfy P > 50% or P > 75%
+    mark("p1_row_loop")
     insns.append(0xE3A07000)  # mov r7, #0 (col = 0)
-    mark("hm_col_loop")
+    mark("p1_col_loop")
     insns.extend((
-        0xE0878306,  # add  r8, r7, r6, lsl #6 (idx = row * 64 + col)
-        0xE1A08088,  # lsl  r8, r8, #1         (byte_off = idx * 2)
-        0xE19090F8,  # ldrsh sb, [r0, r8]      (bg = Ch0)
-        0xE194A0F8,  # ldrsh sl, [r4, r8]      (c1 = Ch1)
-        0xE195C0F8,  # ldrsh ip, [r5, r8]      (c2 = Ch2)
-        0xE24CC002,  # sub  ip, ip, #2         (head priority: c2 - 0.5 logit)
-        0xE15C000A,  # cmp  ip, sl
-        0xC1A0A00C,  # movgt sl, ip            (fg = max(c1, c2 - 2))
-        0xE04AA009,  # sub  sl, sl, sb         (diff = fg - bg)
-        0xE35A0000 | PEAK_THRESH,  # cmp sl, #PEAK_THRESH
-        0xA28BB001,  # addge fp, fp, #1        (area_cnt += (diff >= PEAK_THRESH))
-        0xE15A0001,  # cmp  sl, r1
+        0xE087A306,  # add   sl, r7, r6, lsl #6
+        0xE1A0A08A,  # lsl   sl, sl, #1
+        0xE19400FA,  # ldrsh r0, [r4, sl]      (c0)
+        0xE19510FA,  # ldrsh r1, [r5, sl]      (c1)
+        0xE19920FA,  # ldrsh r2, [sb, sl]      (c2)
+        0xE1510002,  # cmp   r1, r2
     ))
-    b("hm_skip_peak", cond=0xD)  # ble (signed)
+    b("p1_next", cond=0x0)  # beq (neither can exceed 50%)
     insns.extend((
-        0xE1A0100A,  # mov  r1, sl             (max_diff = diff)
-        0xE1A02007,  # mov  r2, r7             (best_col = col)
-        0xE1A03006,  # mov  r3, r6             (best_row = row)
+        0xE1A0C000,  # mov   ip, r0            (c0)
+        0xC1A00001,  # movgt r0, r1            (p = c1)
+        0xC3A03001,  # movgt r3, #1            (tier = 1)
+        0xB1A00002,  # movlt r0, r2            (p = c2)
+        0xB1A02001,  # movlt r2, r1            (b = c1)
+        0xB3A03002,  # movlt r3, #2            (tier = 2)
+        0xE1A0100C,  # mov   r1, ip            (a = c0)
     ))
-    mark("hm_skip_peak")
+    call(cave2_syms["softmax_other"])  # r0=other (999 if not argmax), r1=margin, r3 preserved
+    insns.extend((
+        0xE3530001,  # cmp   r3, #1
+        0x03A0C000 | CH1_OTHER_MAX,  # moveq ip, #255
+        0x13A0C000 | CH2_OTHER_MAX,  # movne ip, #85
+        0xE150000C,  # cmp   r0, ip
+    ))
+    b("p1_next", cond=0x8)  # bhi
+    insns.extend((
+        0xE28DB000,  # add   fp, sp, #0        (&t1)
+        0xE3530002,  # cmp   r3, #2
+        0x028BB018,  # addeq fp, fp, #24       (&t2)
+        0xE59BC014,  # ldr   ip, [fp, #20]
+        0xE28CC001,  # add   ip, ip, #1
+        0xE58BC014,  # str   ip, [fp, #20]     (cnt++)
+        # Compare lexicographic (margin >, other <, dist <)
+        0xE59D2030,  # ldr   r2, [sp, #48]     (ref_c)
+        0xE0572002,  # subs  r2, r7, r2
+        0x42622000,  # rsbmi r2, r2, #0
+        0xE59DC034,  # ldr   ip, [sp, #52]     (ref_r)
+        0xE056C00C,  # subs  ip, r6, ip
+        0x426CC000,  # rsbmi ip, ip, #0
+        0xE082200C,  # add   r2, r2, ip        (dist)
+        0xE59B3000,  # ldr   r3, [fp, #0]      (best_margin)
+        0xE1510003,  # cmp   r1, r3
+    ))
+    b("p1_next", cond=0xB)  # blt
+    b("p1_take", cond=0xC)  # bgt
+    insns.extend((
+        0xE59B3004,  # ldr   r3, [fp, #4]      (best_other)
+        0xE1500003,  # cmp   r0, r3
+    ))
+    b("p1_next", cond=0x8)  # bhi
+    b("p1_take", cond=0x3)  # blo
+    insns.extend((
+        0xE59B3008,  # ldr   r3, [fp, #8]      (best_dist)
+        0xE1520003,  # cmp   r2, r3
+    ))
+    b("p1_next", cond=0x2)  # bhs
+    mark("p1_take")
+    insns.extend((
+        0xE58B1000,  # str   r1, [fp, #0]      (margin)
+        0xE58B0004,  # str   r0, [fp, #4]      (other)
+        0xE58B2008,  # str   r2, [fp, #8]      (dist)
+        0xE58B700C,  # str   r7, [fp, #12]     (best_c)
+        0xE58B6010,  # str   r6, [fp, #16]     (best_r)
+    ))
+
+    mark("p1_next")
     insns.extend((
         0xE2877001,  # add  r7, r7, #1
         0xE3570038,  # cmp  r7, #56
     ))
-    b("hm_col_loop", cond=0xB)  # blt
+    b("p1_col_loop", cond=0xB)
     insns.extend((
         0xE2866001,  # add  r6, r6, #1
         0xE3560038,  # cmp  r6, #56
     ))
-    b("hm_row_loop", cond=0xB)  # blt
+    b("p1_row_loop", cond=0xB)
 
+    # Tier 1 evaluated FIRST (r4=Ch0, r5=Ch1, sb=Ch2 intact)
     insns.extend((
-        0xE1A00001,  # mov  r0, r1 (max_diff)
-        0xE1A01002,  # mov  r1, r2 (best_col)
-        0xE1A02003,  # mov  r2, r3 (best_row)
-        0xE1A0300B,  # mov  r3, fp (area_cnt)
-        0xE8BD8FF0,  # pop  {r4, r5, r6, r7, r8, sb, sl, fp, pc}
+        0xE59D0014,  # ldr  r0, [sp, #20]      (t1_cnt)
+        0xE3500000 | CH1_MIN_LOCAL,
+    ))
+    b("check_tier2", cond=0xB)
+    insns.extend((
+        0xE59D1004,  # ldr  r1, [sp, #4]       (t1_other)
+        0xE3510000 | CH1_PEAK_OTHER_MAX,
+    ))
+    b("check_tier2", cond=0x8)
+    insns.extend((
+        0xE28DB000,  # add  fp, sp, #0        (&t1)
+        0xE3A00001,  # tier = 1
+        0xE3A01000 | LOCAL_RADIUS_CH1,
+        0xE3A02000 | CH1_OTHER_MAX,
+        0xE3A03000 | CH1_MIN_LOCAL,
+    ))
+    b("run_pass2")
+
+    # Tier 2 evaluated ONLY if Tier 1 failed (swap r5 <-> sb -> r5=Ch2, sb=Ch1)
+    mark("check_tier2")
+    insns.extend((
+        0xE59D002C,  # ldr  r0, [sp, #44]      (t2_cnt)
+        0xE3500000 | CH2_MIN_LOCAL,
+    ))
+    b("scan_none", cond=0xB)
+    insns.extend((
+        0xE1A00005,  # swap r5 <-> sb
+        0xE1A05009,
+        0xE1A09000,
+        0xE28DB018,  # add  fp, sp, #24       (&t2)
+        0xE3A00002,  # tier = 2
+        0xE3A01000 | LOCAL_RADIUS_CH2,
+        0xE3A02000 | CH2_OTHER_MAX,
+        0xE3A03000 | CH2_MIN_LOCAL,
     ))
 
-    # ---------------------------------------------------------------------
-    # 3. sub_update_tracking_box(r0=max_diff, r1=best_col, r2=best_row,
-    #                            r3=area_cnt, [sp+0]=fd_obj)
-    # ---------------------------------------------------------------------
-    mark("sub_update_tracking_box")
-    insns.append(0xE92D47F0)  # push {r4, r5, r6, r7, r8, sb, sl, lr} (32 B -> fd_obj @ [sp,#32])
-    ldr32(4, s3.STATUS_VA)
+    # Shared 2-iteration local mean-shift centroid & local span extractor
+    mark("run_pass2")
     insns.extend((
-        0xE5840038,  # str  r0, [r4, #0x38] (last_peak)
-        0xE584303C,  # str  r3, [r4, #0x3c] (last_area)
-        0xE3500000 | PEAK_THRESH,  # cmp r0, #PEAK_THRESH
-    ))
-    b("trk_no_subject", cond=0xB)  # blt (signed)
-    insns.append(0xE3530000 | AREA_THRESH)  # cmp r3, #AREA_THRESH
-    b("trk_no_subject", cond=0xB)  # blt (signed)
-
-    # Read fd_w, fd_h from fd_obj ([sp, #32])
-    insns.extend((
-        0xE59D5020,  # ldr  r5, [sp, #32]   (fd_obj)
-        0xE1D56FBC,  # ldrh r6, [r5, #0xfc] (fd_w)
-        0xE3560000,  # cmp  r6, #0
-        s3.encode_movw(6, 320, cond=0x0),
-        0xE1D57FBE,  # ldrh r7, [r5, #0xfe] (fd_h)
-        0xE3570000,  # cmp  r7, #0
-        s3.encode_movw(7, 212, cond=0x0),
-        # Pixel-center Q8 coordinates: cx_q8 = ((2*col + 1) * fd_w * 73) >> 5
-        0xE0818001,  # add  r8, r1, r1
-        0xE2888001,  # add  r8, r8, #1
-        0xE0080896,  # mul  r8, r6, r8
-        0xE3A0C049,  # mov  ip, #73
-        0xE008089C,  # mul  r8, ip, r8
-        0xE1A082A8,  # lsr  r8, r8, #5      (cx_q8)
-        # cy_q8 = ((2*row + 1) * fd_h * 73) >> 5
-        0xE0829002,  # add  sb, r2, r2
-        0xE2899001,  # add  sb, sb, #1
-        0xE0090997,  # mul  sb, r7, sb
-        0xE009099C,  # mul  sb, ip, sb
-        0xE1A092A9,  # lsr  sb, sb, #5      (cy_q8)
-        # Dynamic Q8 box size: clamp(0x2800 + (area_cnt << 5), 0x2800, min(0x5800, min(w,h)<<7))
-        s3.encode_movw(10, MIN_BOX_Q8),
-        0xE08AA283,  # add  sl, sl, r3, lsl #5
-        s3.encode_movw(12, MAX_BOX_Q8),
-        0xE15A000C,  # cmp  sl, ip
-        0xC1A0A00C,  # movgt sl, ip
-        0xE1560007,  # cmp  r6, r7
-        0xD1A0C006,  # movle ip, r6
-        0xC1A0C007,  # movgt ip, r7
-        0xE1A0C38C,  # lsl  ip, ip, #7      (min(fd_w, fd_h) << 7)
-        0xE15A000C,  # cmp  sl, ip
-        0xC1A0A00C,  # movgt sl, ip
-        # Clamp new_left = clamp(cx_q8 - size/2, 0, (fd_w << 8) - size)
-        0xE05880AA,  # subs r8, r8, sl, lsr #1
-        0x43A08000,  # movmi r8, #0
-        0xE1A0C406,  # lsl  ip, r6, #8
-        0xE04CC00A,  # sub  ip, ip, sl
-        0xE158000C,  # cmp  r8, ip
-        0xC1A0800C,  # movgt r8, ip
-        # Clamp new_top = clamp(cy_q8 - size/2, 0, (fd_h << 8) - size)
-        0xE05990AA,  # subs sb, sb, sl, lsr #1
-        0x43A09000,  # movmi sb, #0
-        0xE1A0C407,  # lsl  ip, r7, #8
-        0xE04CC00A,  # sub  ip, ip, sl
-        0xE159000C,  # cmp  sb, ip
-        0xC1A0900C,  # movgt sb, ip
-        # Confidence = clamp(max_diff + 40, 40, 100)
-        0xE2800028,  # add  r0, r0, #40
-        0xE3500064,  # cmp  r0, #100
-        0xC3A00064,  # movgt r0, #100
-        # Cold-start instant snap if has_box == 0; else EMA smooth
-        0xE594C024,  # ldr  ip, [r4, #0x24]
-        0xE35C0000,  # cmp  ip, #0
-    ))
-    b("trk_store", cond=0x0)  # beq (cold snap)
-
-    insns.extend((
-        0xE5941028,  # ldr  r1, [r4, #0x28] (prev_left)
-        0xE0888001,  # add  r8, r8, r1
-        0xE2888001,  # add  r8, r8, #1
-        0xE1A080A8,  # lsr  r8, r8, #1      ((prev + new + 1) >> 1)
-        0xE594102C,  # ldr  r1, [r4, #0x2c] (prev_top)
-        0xE0899001,  # add  sb, sb, r1
-        0xE2899001,  # add  sb, sb, #1
-        0xE1A090A9,  # lsr  sb, sb, #1
-        0xE5941030,  # ldr  r1, [r4, #0x30] (prev_size)
-        0xE0811081,  # add  r1, r1, r1, lsl #1 (prev * 3)
-        0xE08AA001,  # add  sl, sl, r1
-        0xE28AA002,  # add  sl, sl, #2
-        0xE1A0A12A,  # lsr  sl, sl, #2      ((prev * 3 + new + 2) >> 2)
+        0xE59BC004,  # ldr  ip, [fp, #4]       (best_other)
+        0xE58DC038,  # str  ip, [sp, #56]
+        0xE59BC00C,  # ldr  ip, [fp, #12]      (ac = best_c)
+        0xE59B6010,  # ldr  r6, [fp, #16]      (ar = best_r)
+        0xE58D0000,  # tier
+        0xE58D1004,  # radius
+        0xE58D2008,  # other_max
+        0xE58D300C,  # min_local
+        0xE58DC010,  # ac
+        0xE58D6014,  # ar
+        0xE3A00000,
+        0xE58D0018,  # iter = 0
     ))
 
-    mark("trk_store")
+    mark("p2_iter_loop")
     insns.extend((
-        0xE5848028,  # str  r8, [r4, #0x28] (box_left)
-        0xE584902C,  # str  sb, [r4, #0x2c] (box_top)
-        0xE584A030,  # str  sl, [r4, #0x30] (box_size)
-        0xE5840034,  # str  r0, [r4, #0x34] (confidence)
-        0xE3A01001,  # mov  r1, #1
-        0xE5841024,  # str  r1, [r4, #0x24] (has_box = 1)
-        0xE3A01000,  # mov  r1, #0
-        0xE584101C,  # str  r1, [r4, #0x1c] (lost_cycles = 0)
-        0xE8BD87F0,  # pop  {r4, r5, r6, r7, r8, sb, sl, pc}
+        0xE3A08000,  # sum_w = 0
+        0xE3A0A000,  # sum_wc = 0
+        0xE3A0B000,  # sum_wr = 0
+        0xE58D801C,  # local_cnt = 0
+        0xE3A00037,  # 55
+        0xE58D0020,  # min_c = 55
+        0xE58D8024,  # max_c = 0
+        0xE58D0028,  # min_r = 55
+        0xE58D802C,  # max_r = 0
+        0xE59D0004,  # radius
+        0xE59D1014,  # ar
+        0xE0516000,  # subs r6, r1, r0
+        0xB3A06000,  # r_start
+        0xE0811000,  # add  r1, r1, r0
+        0xE3510037,
+        0xC3A01037,
+        0xE58D1030,  # r_end
+        0xE59D1010,  # ac
+        0xE0512000,
+        0xB3A02000,
+        0xE58D2010,  # c_start
+        0xE0811000,
+        0xE3510037,
+        0xC3A01037,
+        0xE58D1034,  # c_end
     ))
 
-    mark("trk_no_subject")
+    mark("p2_row_loop")
     insns.extend((
-        0xE594101C,  # ldr  r1, [r4, #0x1c] (lost_cycles)
-        0xE2811001,  # add  r1, r1, #1
-        0xE584101C,  # str  r1, [r4, #0x1c]
-        0xE3510000 | LOST_HOLD_CYCLES,  # cmp r1, #LOST_HOLD_CYCLES
-        0xC3A02000,  # movgt r2, #0
-        0xC5842024,  # strgt r2, [r4, #0x24] (Option B: hide box when lost_cycles > 3)
-        0xE8BD87F0,  # pop  {r4, r5, r6, r7, r8, sb, sl, pc}
+        0xE59D001C,  # ldr  r0, [sp, #28]
+        0xE58D003C,  # str  r0, [sp, #60]      (row_prev_cnt)
+        0xE59D7010,  # ldr  r7, [sp, #16]      (col = c_start)
+    ))
+    mark("p2_col_loop")
+    insns.extend((
+        0xE0870306,  # add   r0, r7, r6, lsl #6
+        0xE1A00080,  # lsl   r0, r0, #1        (byte_off)
+        0xE19410F0,  # ldrsh r1, [r4, r0]      (a)
+        0xE19920F0,  # ldrsh r2, [sb, r0]      (b)
+        0xE19500F0,  # ldrsh r0, [r5, r0]      (p, loads r0 LAST)
+    ))
+    call(cave2_syms["softmax_other"])  # r0 = other (or 999)
+    insns.extend((
+        0xE59D2008,  # ldr   r2, [sp, #8]      (other_max)
+        0xE1500002,  # cmp   r0, r2
+    ))
+    b("p2_col_next", cond=0x8)
+    insns.extend((
+        0xE2600C01,  # rsb   r0, r0, #256      (w = 256 - other)
+        0xE0888000,  # add   r8, r8, r0        (sum_w += w)
+        0xE1A01207,  # lsl   r1, r7, #4
+        0xE2811008,  # add   r1, r1, #8
+        0xE02AA190,  # mla   sl, r0, r1, sl    (sum_wc)
+        0xE1A01206,  # lsl   r1, r6, #4
+        0xE2811008,  # add   r1, r1, #8
+        0xE02BB190,  # mla   fp, r0, r1, fp    (sum_wr)
+        0xE59D101C,  # ldr   r1, [sp, #28]
+        0xE2811001,  # add   r1, r1, #1
+        0xE58D101C,  # str   r1, [sp, #28]     (local_cnt++)
+        0xE59D1020,  # ldr   r1, [sp, #32]
+        0xE1570001,  # cmp   r7, r1
+        0xB58D7020,  # strlt r7, [sp, #32]     (min_c)
+        0xE59D1024,  # ldr   r1, [sp, #36]
+        0xE1570001,  # cmp   r7, r1
+        0xC58D7024,  # strgt r7, [sp, #36]     (max_c)
+    ))
+    mark("p2_col_next")
+    insns.extend((
+        0xE2877001,  # add  r7, r7, #1
+        0xE59D0034,  # ldr  r0, [sp, #52]
+        0xE1570000,  # cmp  r7, r0
+    ))
+    b("p2_col_loop", cond=0xD)
+
+    # Track min_r and max_r once per row (row increases monotonically)
+    insns.extend((
+        0xE59D001C,  # ldr  r0, [sp, #28]
+        0xE59D103C,  # ldr  r1, [sp, #60]
+        0xE1500001,  # cmp  r0, r1
+    ))
+    b("p2_row_next", cond=0x0)
+    insns.extend((
+        0xE59D1028,  # ldr   r1, [sp, #40]     (min_r)
+        0xE1560001,  # cmp   r6, r1
+        0xB58D6028,  # strlt r6, [sp, #40]
+        0xE58D602C,  # str   r6, [sp, #44]     (max_r = row)
+    ))
+    mark("p2_row_next")
+    insns.extend((
+        0xE2866001,  # add  r6, r6, #1
+        0xE59D0030,  # ldr  r0, [sp, #48]
+        0xE1560000,  # cmp  r6, r0
+    ))
+    b("p2_row_loop", cond=0xD)
+
+    insns.extend((
+        0xE59D001C,  # local_cnt
+        0xE59D100C,  # min_local
+        0xE1500001,
+    ))
+    b("p2_cnt_ok", cond=0xA)
+    insns.extend((
+        0xE59D0000,  # tier
+        0xE3500001,
+    ))
+    b("check_tier2", cond=0x0)
+    b("scan_none")
+
+    mark("p2_cnt_ok")
+    insns.extend((
+        0xE1A0000A,  # r0 = sum_wc
+        0xE1A01008,  # r1 = sum_w
+    ))
+    call(cave2_syms["udiv10_round"])
+    insns.extend((
+        0xE1A06000,  # r6 = u_c_q4
+        0xE1A0000B,  # r0 = sum_wr
+        0xE1A01008,  # r1 = sum_w
+    ))
+    call(cave2_syms["udiv10_round"])
+    insns.extend((
+        0xE1A07000,  # r7 = u_r_q4
+        0xE59D0018,  # iter
+        0xE3500000,
+    ))
+    b("p2_done", cond=0x1)
+    insns.extend((
+        0xE3A00001,
+        0xE58D0018,  # iter = 1
+        0xE1A01226,
+        0xE58D1010,  # ac = u_c_q4 >> 4
+        0xE1A01227,
+        0xE58D1014,  # ar = u_r_q4 >> 4
+    ))
+    b("p2_iter_loop")
+
+    mark("p2_done")
+    insns.extend((
+        0xE1A00226,
+        0xE1A01227,
+        0xE1800401,
+    ))
+    ldr32(2, s3.STATUS_VA)
+    insns.extend((
+        0xE582004C,  # str  r0, [r2, #0x4c]    (prev_anchor_packed)
+        0xE3A00C64,  # mov  r0, #25600
+        0xE59D1038,  # ldr  r1, [sp, #56]      (best_other)
+        0xE2811C01,  # add  r1, r1, #256
+    ))
+    call(cave2_syms["udiv10_round"])
+    insns.extend((
+        0xE59D1000,
+        0xE1800801,  # (tier << 16) | prob_pct (best_other <= 255 -> 50..100 already)
+        0xE59D3024,
+        0xE59DC020,
+        0xE043300C,
+        0xE2833001,  # span_c
+        0xE59D102C,
+        0xE59DC028,
+        0xE041100C,
+        0xE2811001,  # span_r
+        0xE1833401,
+        0xE59D101C,
+        0xE1833801,
+        0xE1A01006,  # u_c_q4
+        0xE1A02007,  # u_r_q4
+        0xE28DD044,
+        0xE8BD8FF0,
+    ))
+
+    mark("scan_none")
+    insns.extend((
+        0xE3A00000,
+        0xE28DD044,
+        0xE8BD8FF0,
     ))
 
     code, labels = finalize()
-    if CAVE3_VA + len(code) > CAVE3_LIMIT_VA:
-        raise ValueError(f"Cave 3 ({len(code)} B) exceeds ROM zero ceiling {hex(CAVE3_LIMIT_VA)}")
+    if CAVE3_VA + len(code) > CAVE3_CODE_LIMIT_VA:
+        raise ValueError(
+            f"Cave 3 ({len(code)} B, ends {hex(CAVE3_VA + len(code))}) overlaps EXP_LUT @ {hex(EXP_LUT_VA)}"
+        )
     return code, {
         "sub_sample_ahip_rgb": labels["sub_sample_ahip_rgb"],
         "sub_scan_heatmap": labels["sub_scan_heatmap"],
-        "sub_update_tracking_box": labels["sub_update_tracking_box"],
     }
 
 
@@ -549,14 +821,13 @@ def _build_render_osd(render_va: int, bypass_va: int) -> bytes:
     """OSD renderer @ CAVE2_VA (runs while native FD mutex r6 is held; Option B hiding)."""
     insns, mark, b, _, jump, ldr32, finalize = _make_asm(render_va)
 
-    # Validate 4 prerequisites identically to step2c_osd_recovery.py
-    insns.extend((0xE5940078, 0xE3500000))  # result != NULL
+    insns.extend((0xE5940078, 0xE3500000))
     jump(bypass_va, cond=0x0)
-    insns.extend((0xE5940038, 0xE3500000))  # FdLibraryService != NULL
+    insns.extend((0xE5940038, 0xE3500000))
     jump(bypass_va, cond=0x0)
-    insns.extend((0xE1D40FBC, 0xE3500030))  # fd_w >= 48
+    insns.extend((0xE1D40FBC, 0xE3500030))
     jump(bypass_va, cond=0x3)
-    insns.extend((0xE1D40FBE, 0xE3500030))  # fd_h >= 48
+    insns.extend((0xE1D40FBE, 0xE3500030))
     jump(bypass_va, cond=0x3)
 
     insns.append(0xE92D47F0)  # push {r4, r5, r6, r7, r8, sb, sl, lr}
@@ -564,154 +835,152 @@ def _build_render_osd(render_va: int, bypass_va: int) -> bytes:
     ldr32(3, s3.STATUS_VA)
     ldr32(1, LIVE_AI_COOKIE)
     insns.extend((
-        0xE5932018,  # ldr  r2, [r3, #0x18] (cookie)
-        0xE1520001,  # cmp  r2, r1
+        0xE5932018,
+        0xE1520001,
     ))
-    b("hide_box", cond=0x1)  # bne
+    b("hide_box", cond=0x1)
     insns.extend((
-        0xE5932024,  # ldr  r2, [r3, #0x24] (has_box)
-        0xE3520000,  # cmp  r2, #0
+        0xE5932024,
+        0xE3520000,
     ))
-    b("hide_box", cond=0x0)  # beq
+    b("hide_box", cond=0x0)
 
-    # Load smoothed Q8 box & clamp safely against current fd_w/fd_h
+    # Load smoothed Q8 box & clamp safely against current fd_w/fd_h (floor 0x1c00 = 28 px)
     insns.extend((
-        0xE5937028,  # ldr  r7, [r3, #0x28] (left)
-        0xE593802C,  # ldr  r8, [r3, #0x2c] (top)
-        0xE5935030,  # ldr  r5, [r3, #0x30] (size)
-        0xE5939034,  # ldr  sb, [r3, #0x34] (conf)
-        0xE1D40FBC,  # ldrh r0, [r4, #0xfc] (fd_w)
-        0xE1A00400,  # lsl  r0, r0, #8      (fd_w_q8)
-        0xE1D41FBE,  # ldrh r1, [r4, #0xfe] (fd_h)
-        0xE1A01401,  # lsl  r1, r1, #8      (fd_h_q8)
-        0xE3A02B08,  # mov  r2, #0x2000
-        0xE1550002,  # cmp  r5, r2
-        0x31A05002,  # movlo r5, r2
-        0xE1500001,  # cmp  r0, r1
-        0x31A02000,  # movlo r2, r0
-        0x21A02001,  # movhs r2, r1
-        0xE1550002,  # cmp  r5, r2
-        0x81A05002,  # movhi r5, r2
-        0xE0402005,  # sub  r2, r0, r5
-        0xE1570002,  # cmp  r7, r2
-        0x81A07002,  # movhi r7, r2
-        0xE0412005,  # sub  r2, r1, r5
-        0xE1580002,  # cmp  r8, r2
-        0x81A08002,  # movhi r8, r2
+        0xE5937028,
+        0xE593802C,
+        0xE5935030,
+        0xE5939034,
+        0xE1D40FBC,
+        0xE1A00400,
+        0xE1D41FBE,
+        0xE1A01401,
+        0xE3A02B07,  # mov r2, #0x1c00 (defensive 28 px floor < 30 px MIN_HEAD_BOX_Q8)
+        0xE1550002,
+        0x31A05002,
+        0xE1500001,
+        0x31A02000,
+        0x21A02001,
+        0xE1550002,
+        0x81A05002,
+        0xE0402005,
+        0xE1570002,
+        0x81A07002,
+        0xE0412005,
+        0xE1580002,
+        0x81A08002,
     ))
 
     # Zero 100 bytes (0x64) of m_DetectedFaceResult[0]
     insns.extend((
-        0xE594A078,  # ldr  sl, [r4, #0x78]
-        0xE3A00000,  # mov  r0, #0
-        0xE3A01000,  # mov  r1, #0
+        0xE594A078,
+        0xE3A00000,
+        0xE3A01000,
     ))
     mark("zero_face_loop")
     insns.extend((
-        0xE78A0001,  # str  r0, [sl, r1]
-        0xE2811004,  # add  r1, r1, #4
-        0xE3510064,  # cmp  r1, #0x64
+        0xE78A0001,
+        0xE2811004,
+        0xE3510064,
     ))
     b("zero_face_loop", cond=0xB)
 
-    # Populate m_DetectedFaceResult[0] & FaceDetectionService tracking state
     insns.extend((
-        0xE58A7000,  # str  r7, [sl, #0x00] (left)
-        0xE58A8004,  # str  r8, [sl, #0x04] (top)
-        0xE58A5008,  # str  r5, [sl, #0x08] (width)
-        0xE58A500C,  # str  r5, [sl, #0x0c] (height)
-        0xE58A904C,  # str  sb, [sl, #0x4c] (confidence)
-        0xE5941118,  # ldr  r1, [r4, #0x118]
-        0xE3510000,  # cmp  r1, #0
-        0x03A01001,  # moveq r1, #1
-        0xE58A1050,  # str  r1, [sl, #0x50] (face_id)
-        0xE08720A5,  # add  r2, r7, r5, lsr #1 (cx)
-        0xE5842100,  # str  r2, [r4, #0x100]
-        0xE08820A5,  # add  r2, r8, r5, lsr #1 (cy)
-        0xE5842104,  # str  r2, [r4, #0x104]
-        0xE5845108,  # str  r5, [r4, #0x108]
-        0xE584510C,  # str  r5, [r4, #0x10c]
-        0xE5841118,  # str  r1, [r4, #0x118]
-        0xE584111C,  # str  r1, [r4, #0x11c]
-        0xE3A02001,  # mov  r2, #1
-        0xE5C4213C,  # strb r2, [r4, #0x13c] (tracking_active = 1)
-        0xE3A00000,  # mov  r0, #0
-        0xE5C40121,  # strb r0, [r4, #0x121] (is_stabilizing = 0)
-        0xE2843F49,  # add  r3, r4, #0x124
-        0xE1C300B0,  # strh r0, [r3]         (lost_frames_counter = 0)
-        0xE5943038,  # ldr  r3, [r4, #0x38]  (FdLibraryService)
-        0xE3A01001,  # mov  r1, #1
-        0xE5831030,  # str  r1, [r3, #0x30]  (face_count = 1)
-        0xE3A01000,  # mov  r1, #0
-        0xE5831034,  # str  r1, [r3, #0x34]  (main_face_idx = 0)
+        0xE58A7000,
+        0xE58A8004,
+        0xE58A5008,
+        0xE58A500C,
+        0xE58A904C,
+        0xE5941118,
+        0xE3510000,
+        0x03A01001,
+        0xE58A1050,
+        0xE08720A5,
+        0xE5842100,
+        0xE08820A5,
+        0xE5842104,
+        0xE5845108,
+        0xE584510C,
+        0xE5841118,
+        0xE584111C,
+        0xE3A02001,
+        0xE5C4213C,
+        0xE3A00000,
+        0xE5C40121,
+        0xE2843F49,
+        0xE1C300B0,
+        0xE5943038,
+        0xE3A01001,
+        0xE5831030,
+        0xE3A01000,
     ))
-    b("render_done")
+    b("set_main_idx")
 
-    # Option B: hide box cleanly (face_count = 0), MUST still resume at HOOK2_AI_RESUME_VA!
     mark("hide_box")
     insns.extend((
-        0xE5943038,  # ldr  r3, [r4, #0x38]
-        0xE3A01000,  # mov  r1, #0
-        0xE5831030,  # str  r1, [r3, #0x30]  (face_count = 0)
-        0xE5831034,  # str  r1, [r3, #0x34]  (main_face_idx = 0)
+        0xE5943038,
+        0xE3A01000,
+        0xE5831030,
     ))
 
+    mark("set_main_idx")
+    insns.append(0xE5831034)  # main_face_idx = 0
+
     mark("render_done")
-    insns.append(0xE8BD47F0)  # pop {r4, r5, r6, r7, r8, sb, sl, lr}
+    insns.append(0xE8BD47F0)
     jump(s3.HOOK2_AI_RESUME_VA)
 
     code, _ = finalize()
     return code
 
 
-def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> bytes:
-    """Continuous fault-tolerant Start -> Send -> 0x1f/Slot-Poll -> Wait -> Stop(100) core."""
+def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> tuple[bytes, dict[str, int]]:
+    """Continuous fault-tolerant DSP core + tracker + shared math helpers inside Cave 2."""
     insns, mark, b, call, jump, ldr32, finalize = _make_asm(core_va)
 
-    # Prologue: 8 regs (32 B) + 8 B scratch = 40 B (8-byte aligned)
     insns.extend((
         0xE92D47F0,  # push {r4, r5, r6, r7, r8, sb, sl, lr}
         0xE24DD008,  # sub  sp, sp, #8
-        0xE1A0A000,  # mov  sl, r0          (sl = fd_obj)
+        0xE1A0A000,  # mov  sl, r0
     ))
 
     ldr32(8, s3.STATUS_VA)
-    insns.append(0xE5982018)  # ldr r2, [r8, #0x18]
+    insns.append(0xE5982018)
     ldr32(3, LIVE_AI_COOKIE)
-    insns.append(0xE1520003)  # cmp r2, r3
+    insns.append(0xE1520003)
     b("exit_done", cond=0x1)
 
     insns.extend((
-        0xE5987000,  # ldr r7, [r8, #0] (state)
-        0xE3570003,  # cmp r7, #3 (IN_FLIGHT)
+        0xE5987000,
+        0xE3570003,
     ))
     b("do_poll_in_flight", cond=0x0)
-    insns.append(0xE3570002)  # cmp r7, #2 (SEND_NEXT)
+    insns.append(0xE3570002)
     b("do_send_next", cond=0x0)
-    insns.append(0xE3570000)  # cmp r7, #0 (WARMUP / LOAD)
+    insns.append(0xE3570000)
     b("exit_done", cond=0x1)
 
-    # --- State 0: Warmup (20 frames) + One-shot LoadDsp (retries every 64 frames if storage busy) ---
+    # --- State 0: Warmup (20 frames) + One-shot LoadDsp ---
     insns.extend((
-        0xE5982004,  # ldr  r2, [r8, #4] (ticks)
-        0xE2822001,  # add  r2, r2, #1
-        0xE5882004,  # str  r2, [r8, #4]
-        0xE2523000 | WARMUP_FRAMES,  # subs r3, r2, #WARMUP_FRAMES
+        0xE5982004,
+        0xE2822001,
+        0xE5882004,
+        0xE2523000 | WARMUP_FRAMES,
     ))
-    b("exit_done", cond=0x3)  # blo (wait warmup)
-    insns.append(0xE3130000 | LOAD_RETRY_MASK)  # tst r3, #0x3f
-    b("exit_done", cond=0x1)  # bne (retry cadence)
+    b("exit_done", cond=0x3)
+    insns.append(0xE3130000 | LOAD_RETRY_MASK)
+    b("exit_done", cond=0x1)
 
     call(s3.GET_DSP_SVC_VA)
     insns.append(0xE3500000)
     b("exit_done", cond=0x0)
     insns.extend((
-        0xE5905004,  # ldr r5, [r0, #4]
-        0xE3550000,  # cmp r5, #0
+        0xE5905004,
+        0xE3550000,
     ))
     b("have_svc_init", cond=0x1)
 
-    insns.append(0xE3A01000)  # mov r1, #0
+    insns.append(0xE3A01000)
     call(s3.CREATE_DSP_SVC_VA)
     call(s3.GET_DSP_SVC_VA)
     insns.append(0xE3500000)
@@ -723,17 +992,15 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> bytes:
     b("exit_done", cond=0x0)
 
     mark("have_svc_init")
-    # Never hijack an already-started DspService
     insns.extend((
-        0xE5952004,  # ldr r2, [r5, #4]
-        0xE3120004,  # tst r2, #4 (STARTED)
+        0xE5952004,
+        0xE3120004,
     ))
     b("exit_done", cond=0x1)
 
-    # Try Drive 'C' (SD card), fallback to Drive 'I' (internal flash)
     insns.extend((
-        0xE1A00005,  # mov r0, r5
-        0xE3A01043,  # mov r1, #'C'
+        0xE1A00005,
+        0xE3A01043,
         0xE3A02000,
         0xE3A03000,
     ))
@@ -742,8 +1009,8 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> bytes:
     b("load_ok", cond=0x1)
 
     insns.extend((
-        0xE1A00005,  # mov r0, r5
-        0xE3A01049,  # mov r1, #'I'
+        0xE1A00005,
+        0xE3A01049,
         0xE3A02000,
         0xE3A03000,
     ))
@@ -751,52 +1018,48 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> bytes:
     insns.append(0xE3500000)
     b("load_ok", cond=0x1)
 
-    # Both failed: clear false LOADED bit and retry in 64 frames
     insns.extend((
         0xE3A02000,
-        0xE5852004,  # str r2, [r5, #4]
+        0xE5852004,
         0xE3A02001,
-        0xE5882010,  # last_err = 1
+        0xE5882010,
     ))
     b("exit_done")
 
     mark("load_ok")
     insns.extend((
-        0xE5885020,  # service_ptr = r5
-        0xE3A00002,  # state = 2 (SEND_NEXT)
+        0xE5885020,
+        0xE3A00002,
         0xE5880000,
     ))
     b("exit_done")
 
-    # --- State 2: Sample live AHIP RGB -> Start(0x52100000) -> SendMessage(4) ---
+    # --- State 2: Sample rotated AHIP RGB -> Start(0x52100000) -> SendMessage(4) ---
     mark("do_send_next")
     call(s3.GET_DSP_SVC_VA)
     b("check_service_identity", bl=True)
     insns.extend((
         0xE5952004,
-        0xE3120004,  # if unexpectedly still started, stop cleanly and retry next frame
+        0xE3120004,
     ))
     b("stop_and_retry", cond=0x1)
 
-    # Sample live AHIP frame into 0x52b00000 & flush cache
-    insns.append(0xE1A0000A)  # mov r0, sl (fd_obj)
+    insns.append(0xE1A0000A)
     call(cave3_syms["sub_sample_ahip_rgb"])
     insns.append(0xE3500000)
-    b("exit_done", cond=0x0)  # skip cycle safely if AHIP not ready
+    b("exit_done", cond=0x0)
 
-    # Start DSP at 0x52100000
     insns.append(0xE1A00005)
     ldr32(1, 0x52100000)
     insns.append(0xE3A02000)
     call(s3.START_DSP_VA)
     insns.extend((
-        0xE5880010,  # last_err = Start() ret
+        0xE5880010,
         0xE5952004,
-        0xE3120004,  # verify STARTED bit set
+        0xE3120004,
     ))
     b("exit_done", cond=0x0)
 
-    # Prepare 10-word DspCommandParameter @ TENSOR_MSG_VA
     ldr32(7, s3.TENSOR_MSG_VA)
     ldr32(0, s3.DESC_TABLE_VA)
     insns.extend((
@@ -816,79 +1079,78 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> bytes:
     insns.append(0xE5870014)
     ldr32(0, 0x0C0C0C0A)
     insns.append(0xE5870018)
-    ldr32(0, 0x0C0C0C0C)
+    insns.append(0xE2800002)  # 0x0C0C0C0C
     insns.append(0xE587001C)
 
     insns.extend((
-        0xE2886008,  # r6 = STATUS_VA + 8 (&seq)
+        0xE2886008,
         0xE3A00000,
-        0xE1C600B0,  # strh r0, [r6]
-        0xE1A00005,  # mov  r0, r5
-        0xE1A01006,  # mov  r1, r6
-        0xE3A02004,  # mov  r2, #4
-        0xE3A03064,  # mov  r3, #100
-        0xE58D7000,  # str  r7, [sp]
+        0xE1C600B0,
+        0xE1A00005,
+        0xE1A01006,
+        0xE3A02004,
+        0xE3A03064,
+        0xE58D7000,
     ))
     call(s3.SEND_MSG_VA)
     insns.extend((
-        0xE5880010,  # last_err
+        0xE5880010,
         0xE3500000,
     ))
     b("stop_and_retry", cond=0x1)
 
     insns.extend((
         0xE3A00000,
-        0xE588000C,  # poll_frames = 0
-        0xE3A00003,  # state = 3 (IN_FLIGHT)
+        0xE588000C,
+        0xE3A00003,
         0xE5880000,
     ))
     b("exit_done")
 
-    # --- State 3: Service 0x1f + read-only [svc+0x54] slot poll -> Wait -> Stop(100) -> Heatmap ---
+    # --- State 3: Service 0x1f + read-only [svc+0x54] slot poll -> Wait -> Stop(100) -> Scan ---
     mark("do_poll_in_flight")
     call(s3.GET_DSP_SVC_VA)
     b("check_service_identity", bl=True)
     insns.extend((
         0xE5952004,
-        0xE3120004,  # if unexpectedly stopped, return to SEND_NEXT
+        0xE3120004,
     ))
     b("reset_to_send_next", cond=0x0)
 
     insns.extend((
-        0xE2886008,  # r6 = STATUS_VA + 8 (&seq)
-        0xE1D610B0,  # ldrh r1, [r6]
-        0xE3510005,  # cmp  r1, #5
+        0xE2886008,
+        0xE1D610B0,
+        0xE3510005,
     ))
-    b("stop_and_retry", cond=0x8)  # bhi
+    b("stop_and_retry", cond=0x8)
 
-    # Service DSP msg_id==0x1f cache flush flag (DspSF bit 0x10000) read-only
     insns.extend((
         0xE3A00000,
         0xE58D0000,
-        0xE285000C,  # r0 = svc + 0x0c (DspSF)
-        0xE3A01801,  # r1 = 0x10000
-        0xE1A0200D,  # r2 = sp (&flgptn)
-        0xE3A03000,  # r3 = 0 (timeout=0)
+        0xE285000C,
+        0xE3A01801,
+        0xE1A0200D,
+        0xE3A03000,
     ))
     call(OS_EF_WAIT_VA)
     insns.append(0xE3500000)
     b("skip_flush1f", cond=0x0)
 
     insns.extend((
-        0xE5953058,  # cache_req_table = [svc + 0x58]
+        0xE5953058,
         0xE3530000,
     ))
     b("clear_1f", cond=0x0)
     insns.extend((
-        0xE5932008,  # size = [table + 8]
+        0xE5932008,
         0xE3520000,
     ))
     b("clear_1f", cond=0x0)
-    insns.append(0xE1A04003)  # mov r4, r3
+    insns.append(0xE1A04003)
     call(s3.GET_CACHE_MGR_VA)
     insns.extend((
-        0xE5941004,  # addr = [r4 + 4]
-        0xE5942008,  # size = [r4 + 8]
+        0xE5941004,
+        0xE5942008,
     ))
     call(s3.FLUSH_DCACHE_VA)
     insns.extend((
@@ -906,72 +1168,69 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> bytes:
 
     mark("skip_flush1f")
     insns.extend((
-        0xE1D610B0,  # ldrh r1, [r6] (seq)
-        0xE5950054,  # r0 = [svc + 0x54] (6-slot reply table)
+        0xE1D610B0,
+        0xE5950054,
         0xE3500000,
     ))
     b("stop_and_retry", cond=0x0)
 
-    insns.append(0xE3A02000)  # off = 0
+    insns.append(0xE3A02000)
     mark("scan_slot")
     insns.extend((
-        0xE7D03002,  # ldrb r3, [r0, r2] (occupied)
+        0xE7D03002,
         0xE3530000,
     ))
     b("scan_next", cond=0x0)
     insns.extend((
-        0xE0807002,  # add  r7, r0, r2
-        0xE1D730B2,  # ldrh r3, [r7, #2] (slot seq)
-        0xE1530001,  # cmp  r3, r1
+        0xE0807002,
+        0xE1D730B2,
+        0xE1530001,
     ))
     b("slot_ready", cond=0x0)
     mark("scan_next")
     insns.extend((
-        0xE282202C,  # off += 0x2c
-        0xE3520F42,  # cmp off, #0x108
+        0xE282202C,
+        0xE3520F42,
     ))
     b("scan_slot", cond=0x1)
 
-    # Not ready yet: increment poll_frames; auto-recover on timeout >= MAX_POLL_FRAMES
     insns.extend((
         0xE598200C,
         0xE2822001,
         0xE588200C,
         0xE3520000 | MAX_POLL_FRAMES,
     ))
-    b("exit_done", cond=0x3)  # blo (still waiting, 0 ms block)
+    b("exit_done", cond=0x3)
 
     insns.extend((
         0xE3A00008,
-        0xE5880010,  # last_err = 8 (timeout)
+        0xE5880010,
     ))
     b("stop_and_retry")
 
-    # Matching reply ready: WaitMessage(0) -> Stop(100) -> Invalidate 0x52b09a00 -> Scan -> Update Box
     mark("slot_ready")
     insns.extend((
-        0xE1A00005,  # r0 = svc
-        0xE1D610B0,  # r1 = seq
-        0xE3A02000,  # r2 = 0 (timeout)
+        0xE1A00005,
+        0xE1D610B0,
+        0xE3A02000,
     ))
     ldr32(3, RESP_BUF_VA)
     call(s3.WAIT_MSG_VA)
-    insns.append(0xE1A04000)  # r4 = WaitMessage return code
+    insns.append(0xE1A04000)
 
-    # Always Stop(100) cleanly around every inference (K-3 III lifecycle)
     b("stop_dsp", bl=True)
     insns.extend((
-        0xE3A00002,  # state = 2 (SEND_NEXT)
+        0xE3A00002,
         0xE5880000,
-        0xE3540000,  # cmp r4, #0
+        0xE3540000,
     ))
     b("wait_ok", cond=0x0)
-    insns.append(0xE5884010)  # last_err = WaitMessage error
+    insns.append(0xE5884010)
     b("exit_done")
 
     mark("wait_ok")
     insns.extend((
-        0xE5982014,  # cycles_ok++
+        0xE5982014,
         0xE2822001,
         0xE5882014,
     ))
@@ -982,24 +1241,23 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> bytes:
 
     ldr32(0, HEATMAP_OUT_VA)
     call(cave3_syms["sub_scan_heatmap"])
-    insns.append(0xE58DA000)  # str sl, [sp, #0] (pass fd_obj)
-    call(cave3_syms["sub_update_tracking_box"])
+    insns.append(0xE58DA000)
+    b("sub_update_tracking_box", bl=True)
     b("exit_done")
 
-    # --- Helpers ---
     mark("stop_and_retry")
     b("stop_dsp", bl=True)
     mark("reset_to_send_next")
     insns.extend((
-        0xE3A00002,  # state = 2 (SEND_NEXT)
+        0xE3A00002,
         0xE5880000,
     ))
     b("exit_done")
 
     mark("stop_dsp")
     insns.extend((
-        0xE1A00005,  # mov r0, r5
-        0xE3A01064,  # mov r1, #100
+        0xE1A00005,
+        0xE3A01064,
     ))
     jump(STOP_DSP_VA)
 
@@ -1010,53 +1268,344 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> bytes:
     b("exit_done", cond=0x0)
     insns.extend((0xE5982020, 0xE1550002))
     b("exit_done", cond=0x1)
-    insns.append(0xE12FFF1E)  # bx lr
+    insns.append(0xE12FFF1E)
 
     mark("exit_done")
     insns.extend((
-        0xE28DD008,  # add sp, sp, #8
-        0xE8BD87F0,  # pop {r4, r5, r6, r7, r8, sb, sl, pc}
+        0xE28DD008,
+        0xE8BD87F0,
     ))
 
-    code, _ = finalize()
-    return code
+    # ---------------------------------------------------------------------
+    # sub_update_tracking_box: 2-cycle cold confirmation, inverse orientation,
+    # tight head/body span sizing, position/size deadbands & smooth EMA
+    # ---------------------------------------------------------------------
+    mark("sub_update_tracking_box")
+    insns.append(0xE92D4FF0)  # push {r4..fp, lr} (36 B -> fd_obj @ [sp,#36])
+    ldr32(4, s3.STATUS_VA)
+    insns.extend((
+        0xE5840038,  # last_peak
+        0xE1A0C823,  # lsr ip, r3, #16
+        0xE584C03C,  # last_area
+        0xE3500000,
+    ))
+    b("trk_no_subject", cond=0x0)
+
+    insns.extend((
+        0xE3A0C000,
+        0xE584C01C,  # lost_cycles = 0
+        0xE594B024,  # has_box
+        0xE35B0000,
+    ))
+    b("trk_confirmed", cond=0x1)
+    insns.extend((
+        0xE594C048,
+        0xE28CC001,
+        0xE584C048,
+        0xE35C0000 | ACQ_CONFIRM_CYCLES,
+        0xB8BD8FF0,  # poplt {r4..fp, pc}
+    ))
+
+    mark("trk_confirmed")
+    insns.extend((
+        0xE59D5024,  # fd_obj
+        0xE1D56FBC,  # fd_w
+        0xE3560000,
+        s3.encode_movw(6, 320, cond=0x0),
+        0xE1D57FBE,  # fd_h
+        0xE3570000,
+        s3.encode_movw(7, 212, cond=0x0),
+        0xE1A05820,  # r5 = tier (1 or 2)
+        0xE6FF0070,  # r0 = prob_pct
+        # Compact conditional inverse rotation: r8=s_c_q4, sb=s_r_q4, r1=span_x, r2=span_y
+        0xE594C044,  # ip = in_flight_orient
+        s3.encode_movw(14, 896),
+        0xE1A08001,  # default orient 0: s_c = u_c_q4
+        0xE1A09002,  # default orient 0: s_r = u_r_q4
+        0xE35C0001,  # orient 1 ('L')?
+        0x004E8002,  # subeq r8, lr, r2
+        0x01A09001,  # moveq sb, r1
+        0xE35C0002,  # orient 2 ('D')?
+        0x004E8001,  # subeq r8, lr, r1
+        0x004E9002,  # subeq sb, lr, r2
+        0xE35C0003,  # orient 3 ('R')?
+        0x01A08002,  # moveq r8, r2
+        0x004E9001,  # subeq sb, lr, r1
+        # span_x, span_y depend only on orient & 1 (swap on 1 or 3)
+        0xE31C0001,  # tst ip, #1
+        0xE20310FF,  # r1 = span_c
+        0xE1A02423,  # lsr r2, r3, #8
+        0xE20220FF,  # r2 = span_r
+        0x11A0E001,  # movne lr, r1 (swap r1 <-> r2 on portrait)
+        0x11A01002,  # movne r1, r2
+        0x11A0200E,  # movne r2, lr
+        # Sub-pixel Q8 center & tight local-span Q8 box size
+        s3.encode_movw(14, 585),
+        0xE0080896,  # mul r8, r6, r8
+        0xE008089E,  # mul r8, lr, r8
+        0xE1A085A8,  # lsr r8, r8, #11
+        0xE0090997,  # mul sb, r7, sb
+        0xE009099E,  # mul sb, lr, sb
+        0xE1A095A9,  # lsr sb, sb, #11
+        0xE0010196,  # span_x * fd_w
+        0xE0020297,  # span_y * fd_h
+        0xE1510002,
+        0xB1A01002,
+        0xE3A0C049,
+        0xE00A0C91,
+        0xE1A0A22A,  # raw
+        0xE3550001,
+        0x108AA08A,  # addne sl, sl, sl, lsl #1
+        0x11A0A12A,  # lsrne sl, sl, #2      (Tier 2: raw = (raw * 3) >> 2)
+        0x03A0CC1E,  # moveq ip, #0x1e00     (MIN_HEAD_BOX_Q8)
+        0x13A0CC24,  # movne ip, #0x2400     (MIN_BODY_BOX_Q8)
+        0xE15A000C,  # cmp   sl, ip
+        0xB1A0A00C,  # movlt sl, ip
+        0x03A0CC38,  # moveq ip, #0x3800     (MAX_HEAD_BOX_Q8)
+        0x13A0CC3C,  # movne ip, #0x3c00     (MAX_BODY_BOX_Q8)
+        0xE15A000C,  # cmp   sl, ip
+        0xC1A0A00C,  # movgt sl, ip
+    ))
+
+    mark("size_aspect_cap")
+    insns.extend((
+        0xE1560007,
+        0xD1A0C006,
+        0xC1A0C007,
+        0xE1A0C38C,
+        0xE15A000C,
+        0xC1A0A00C,
+        0xE35B0000,
+    ))
+    b("trk_clamp_store", cond=0x0)
+
+    insns.extend((
+        0xE5941028,
+        0xE594202C,
+        0xE5943030,
+        0xE08110A3,
+        0xE08220A3,
+        0xE0585001,
+        0x42655000,
+        s3.encode_movw(12, POS_DEADBAND_Q8),
+        0xE155000C,
+    ))
+    b("trk_ema_pos", cond=0xC)
+    insns.extend((
+        0xE059E002,
+        0x426EE000,
+        0xE15E000C,
+    ))
+    b("trk_ema_pos", cond=0xC)
+    insns.extend((
+        0xE1A08001,
+        0xE1A09002,
+    ))
+    b("trk_smooth_size")
+
+    mark("trk_ema_pos")
+    insns.extend((
+        0xE0811081,
+        0xE0888001,
+        0xE2888002,
+        0xE1A08128,
+        0xE0822082,
+        0xE0899002,
+        0xE2899002,
+        0xE1A09129,
+    ))
+
+    mark("trk_smooth_size")
+    insns.extend((
+        0xE05A5003,
+        0x42655000,
+        s3.encode_movw(12, SIZE_DEADBAND_Q8),
+        0xE155000C,
+        0xD1A0A003,
+    ))
+    b("trk_clamp_store", cond=0xD)
+    insns.extend((
+        0xE0633183,
+        0xE08AA003,
+        0xE28AA004,
+        0xE1A0A1AA,
+    ))
+
+    mark("trk_clamp_store")
+    insns.extend((
+        0xE05880AA,
+        0x43A08000,
+        0xE1A0C406,
+        0xE04CC00A,
+        0xE158000C,
+        0xC1A0800C,
+        0xE05990AA,
+        0x43A09000,
+        0xE1A0C407,
+        0xE04CC00A,
+        0xE159000C,
+        0xC1A0900C,
+        0xE5848028,
+        0xE584902C,
+        0xE584A030,
+        0xE5840034,
+        0xE3A01001,
+        0xE5841024,
+        0xE3A01000,
+        0xE5841048,
+        0xE8BD8FF0,
+    ))
+
+    mark("trk_no_subject")
+    insns.extend((
+        0xE3A01000,
+        0xE5841048,
+        0xE594101C,
+        0xE2811001,
+        0xE584101C,
+        0xE3510000 | LOST_HOLD_CYCLES,
+        0xC3A02000,
+        0xC5842024,
+        0xE8BD8FF0,
+    ))
+
+    # ---------------------------------------------------------------------
+    # Shared leaf helper: udiv10_round(r0 = num, r1 = den) -> (num + den/2) // den
+    # ---------------------------------------------------------------------
+    mark("udiv10_round")
+    insns.extend((
+        0xE3510000,
+        0x03A00000,
+        0x012FFF1E,
+        0xE08000A1,
+        0xE3A02000,
+        0xE1A01481,
+        0xE3A03C02,
+    ))
+    mark("udiv_loop")
+    insns.extend((
+        0xE1500001,
+        0x20400001,
+        0x21822003,
+        0xE1A010A1,
+        0xE1B030A3,
+    ))
+    b("udiv_loop", cond=0x1)
+    insns.extend((
+        0xE1A00002,
+        0xE12FFF1E,
+    ))
+
+    # ---------------------------------------------------------------------
+    # Shared leaf helper: softmax_other(r0=p, r1=a, r2=b) -> r0=other (or 999), r1=margin
+    # Preserves r3 and all callee-saved registers.
+    # ---------------------------------------------------------------------
+    mark("softmax_other")
+    insns.extend((
+        0xE1500001,  # cmp   r0, r1 (p > a?)
+    ))
+    b("sm_fail", cond=0xD)
+    insns.append(0xE1500002)  # cmp r0, r2 (p > b?)
+    b("sm_fail", cond=0xD)
+    insns.extend((
+        0xE0401001,  # sub    r1, r0, r1 (da > 0)
+        0xE0402002,  # sub    r2, r0, r2 (db > 0)
+    ))
+    ldr32(12, EXP_LUT_VA)
+    insns.extend((
+        0xE351000F,  # cmp    r1, #15
+        0x97DC0001,  # ldrlsb r0, [ip, r1]
+        0x83A00000,  # movhi  r0, #0
+        0xE352000F,  # cmp    r2, #15
+        0x97DCC002,  # ldrlsb ip, [ip, r2]
+        0x83A0C000,  # movhi  ip, #0
+        0xE080000C,  # add    r0, r0, ip (other = ea + eb)
+        0xE1510002,  # cmp    r1, r2
+        0xC1A01002,  # movgt  r1, r2     (margin = min(da, db))
+        0xE12FFF1E,  # bx     lr
+    ))
+    mark("sm_fail")
+    insns.extend((
+        s3.encode_movw(0, 999),
+        0xE12FFF1E,
+    ))
+
+    code, labels = finalize()
+    return code, {
+        "sub_update_tracking_box": labels["sub_update_tracking_box"],
+        "udiv10_round": labels["udiv10_round"],
+        "softmax_other": labels["softmax_other"],
+    }
 
 
-def cave_layout() -> dict:
-    """Compute exact virtual addresses and sizes for Caves 1, 2, and 3."""
-    cave1 = build_live_ai_cave1()
-    cave3, cave3_syms = build_live_ai_cave3()
-
-    # Render block size is independent of bypass_va target address
+def _resolve_all() -> dict:
+    """Two-pass deterministic build resolving mutual calls between Cave 2 and Cave 3."""
     render_len = len(_build_render_osd(s3.CAVE2_VA, s3.CAVE2_VA))
     shim_va = s3.CAVE2_VA + render_len
-    shim_len = 28  # 7 words (includes mov r0, r4)
+    shim_len = 28
     bypass_va = shim_va + shim_len
-    bypass_len = 20  # 5 words
+    bypass_len = 20
     core_va = bypass_va + bypass_len
-    core_len = len(_build_live_ai_core(core_va, cave3_syms))
-    cave2_len = render_len + shim_len + bypass_len + core_len
 
+    # Pass 1: discover exact symbol VAs (all bl instructions are constant 4 B regardless of target)
+    dummy_c3 = {"sub_sample_ahip_rgb": CAVE3_VA, "sub_scan_heatmap": CAVE3_VA}
+    _, cave2_syms = _build_live_ai_core(core_va, dummy_c3)
+    _, cave3_syms = _build_cave3_body(cave2_syms)
+
+    # Pass 2: assemble final linked payloads with true VAs
+    core, cave2_syms2 = _build_live_ai_core(core_va, cave3_syms)
+    cave3, cave3_syms2 = _build_cave3_body(cave2_syms2)
+    assert cave2_syms == cave2_syms2 and cave3_syms == cave3_syms2
     return {
-        "cave1_va": s3.CAVE1_VA,
-        "cave1_len": len(cave1),
-        "cave1_margin": s3.CAVE2_VA - (s3.CAVE1_VA + len(cave1)),
-        "render_va": s3.CAVE2_VA,
         "render_len": render_len,
         "shim_va": shim_va,
         "shim_len": shim_len,
         "bypass_va": bypass_va,
         "bypass_len": bypass_len,
         "core_va": core_va,
+        "core": core,
+        "cave3": cave3,
+        "cave2_syms": cave2_syms2,
+        "cave3_syms": cave3_syms2,
+    }
+
+
+def build_live_ai_cave3() -> tuple[bytes, dict[str, int]]:
+    resolved = _resolve_all()
+    return resolved["cave3"], resolved["cave3_syms"]
+
+
+def cave_layout() -> dict:
+    """Compute exact virtual addresses and sizes for Caves 1, 2, 3, and EXP_LUT."""
+    cave1 = build_live_ai_cave1()
+    res = _resolve_all()
+    core_len = len(res["core"])
+    cave2_len = res["render_len"] + res["shim_len"] + res["bypass_len"] + core_len
+    cave3_len = len(res["cave3"])
+
+    return {
+        "cave1_va": s3.CAVE1_VA,
+        "cave1_len": len(cave1),
+        "cave1_margin": s3.CAVE2_VA - (s3.CAVE1_VA + len(cave1)),
+        "render_va": s3.CAVE2_VA,
+        "render_len": res["render_len"],
+        "shim_va": res["shim_va"],
+        "shim_len": res["shim_len"],
+        "bypass_va": res["bypass_va"],
+        "bypass_len": res["bypass_len"],
+        "core_va": res["core_va"],
         "core_len": core_len,
         "cave2_len": cave2_len,
         "cave2_end_va": s3.CAVE2_VA + cave2_len,
         "cave2_margin": s3.DESC_TABLE_VA - (s3.CAVE2_VA + cave2_len),
         "cave3_va": CAVE3_VA,
-        "cave3_len": len(cave3),
-        "cave3_end_va": CAVE3_VA + len(cave3),
-        "cave3_margin": CAVE3_LIMIT_VA - (CAVE3_VA + len(cave3)),
-        "cave3_syms": cave3_syms,
+        "cave3_len": cave3_len,
+        "cave3_end_va": CAVE3_VA + cave3_len,
+        "cave3_margin": CAVE3_CODE_LIMIT_VA - (CAVE3_VA + cave3_len),
+        "exp_lut_va": EXP_LUT_VA,
+        "exp_lut_len": len(EXP_LUT_BYTES),
+        "cave2_syms": res["cave2_syms"],
+        "cave3_syms": res["cave3_syms"],
     }
 
 
@@ -1069,13 +1618,13 @@ def build_update_hook() -> bytes:
 
 
 def build_live_ai_cave2() -> bytes:
-    """Assemble Cave 2 @ 0x53000e00 (OSD renderer + post-update shim + bypass + DSP core)."""
-    info = cave_layout()
-    render = _build_render_osd(info["render_va"], info["bypass_va"])
-    shim_va = info["shim_va"]
-    bypass_va = info["bypass_va"]
-    core_va = info["core_va"]
-    core = _build_live_ai_core(core_va, info["cave3_syms"])
+    """Assemble Cave 2 @ 0x53000e00 (OSD renderer + post-update shim + bypass + DSP core + tracker)."""
+    res = _resolve_all()
+    render = _build_render_osd(s3.CAVE2_VA, res["bypass_va"])
+    shim_va = res["shim_va"]
+    bypass_va = res["bypass_va"]
+    core_va = res["core_va"]
+    core = res["core"]
 
     wrapper = struct.pack(
         "<7I",
@@ -1103,7 +1652,7 @@ def build_live_ai_cave2() -> bytes:
 
 
 def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> dict:
-    """Apply Step 2D v1.2.17 live-frame AI AF patch non-destructively inside RTOS bounds."""
+    """Apply Step 2D v1.2.18 K-3 III tuned live AI AF patch non-destructively inside RTOS."""
     if not __debug__:
         raise RuntimeError("Stage 3 preflight uses assertions; do not run with python -O")
     update_off = rtos_start + HOOK_UPDATE_VA - s3.GR4_BASE
@@ -1118,10 +1667,13 @@ def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> d
 
     cave3, _ = build_live_ai_cave3()
     cave3_off = rtos_start + CAVE3_VA - s3.GR4_BASE
-    if not rtos_start <= cave3_off < cave3_off + len(cave3) <= rtos_end:
-        raise ValueError("Cave 3 out of RTOS bounds")
+    lut_off = rtos_start + EXP_LUT_VA - s3.GR4_BASE
+    if not rtos_start <= cave3_off < cave3_off + len(cave3) <= lut_off < lut_off + len(EXP_LUT_BYTES) <= rtos_end:
+        raise ValueError("Cave 3 or EXP_LUT out of RTOS bounds")
     if payload[cave3_off : cave3_off + len(cave3)] != bytes(len(cave3)):
         raise ValueError("Cave 3 destination is not empty zero space")
+    if payload[lut_off : lut_off + len(EXP_LUT_BYTES)] != bytes(len(EXP_LUT_BYTES)):
+        raise ValueError("EXP_LUT destination is not empty zero space")
 
     check = bytearray(payload)
     manifest = s3.apply_stage3_patch(
@@ -1131,6 +1683,7 @@ def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> d
         cave2_builder=build_live_ai_cave2,
     )
     check[cave3_off : cave3_off + len(cave3)] = cave3
+    check[lut_off : lut_off + len(EXP_LUT_BYTES)] = EXP_LUT_BYTES
     check[update_off : update_off + 4] = build_update_hook()
 
     if payload[:rtos_start] != check[:rtos_start] or payload[rtos_end:] != check[rtos_end:]:
@@ -1139,7 +1692,7 @@ def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> d
     payload[:] = check
     info = cave_layout()
     manifest.update({
-        "stage": "Step 2D v1.2.17: Live-frame continuous CEVA-XM4 AI subject-tracking AF (Option B)",
+        "stage": "Step 2D v1.2.18: K-3 III Official Softmax, Priority, Orientation & Local Centroid AI AF (Option B)",
         "post_update_hook": {
             "va": hex(HOOK_UPDATE_VA),
             "offset": hex(update_off),
@@ -1153,17 +1706,33 @@ def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> d
             "margin": info["cave3_margin"],
             "symbols": {k: hex(v) for k, v in info["cave3_syms"].items()},
         },
+        "exp_lut": {
+            "va": hex(EXP_LUT_VA),
+            "offset": hex(lut_off),
+            "length": len(EXP_LUT_BYTES),
+            "hex": EXP_LUT_BYTES.hex(),
+        },
         "layout": {
             k: hex(v) if isinstance(v, int) and "va" in k else v
             for k, v in info.items()
-            if k != "cave3_syms"
+            if k not in ("cave2_syms", "cave3_syms")
         },
         "heatmap_out_va": hex(HEATMAP_OUT_VA),
         "heatmap_len": hex(HEATMAP_LEN),
         "work_buf_flush_len": hex(WORK_BUF_FLUSH_LEN),
-        "peak_thresh": PEAK_THRESH,
-        "area_thresh": AREA_THRESH,
-        "lost_hold_cycles": LOST_HOLD_CYCLES,
+        "k3_tuning": {
+            "ch1_other_max": CH1_OTHER_MAX,
+            "ch1_peak_other_max": CH1_PEAK_OTHER_MAX,
+            "ch1_min_local": CH1_MIN_LOCAL,
+            "ch2_other_max": CH2_OTHER_MAX,
+            "ch2_min_local": CH2_MIN_LOCAL,
+            "acq_confirm_cycles": ACQ_CONFIRM_CYCLES,
+            "lost_hold_cycles": LOST_HOLD_CYCLES,
+            "head_box_q8": [MIN_HEAD_BOX_Q8, MAX_HEAD_BOX_Q8],
+            "body_box_q8": [MIN_BODY_BOX_Q8, MAX_BODY_BOX_Q8],
+            "pos_deadband_q8": POS_DEADBAND_Q8,
+            "size_deadband_q8": SIZE_DEADBAND_Q8,
+        },
     })
     return manifest
 
@@ -1175,7 +1744,8 @@ if __name__ == "__main__":
     c3, syms = build_live_ai_cave3()
     print(f"Cave 1: {len(c1)} B @ {hex(s3.CAVE1_VA)}..{hex(s3.CAVE1_VA + len(c1))} (margin {info['cave1_margin']} B)")
     print(f"Cave 2: {len(c2)} B @ {hex(s3.CAVE2_VA)}..{hex(info['cave2_end_va'])} (margin {info['cave2_margin']} B)")
-    print(f"Cave 3: {len(c3)} B @ {hex(CAVE3_VA)}..{hex(info['cave3_end_va'])} (margin {info['cave3_margin']} B)")
+    print(f"Cave 3: {len(c3)} B @ {hex(CAVE3_VA)}..{hex(info['cave3_end_va'])} (margin {info['cave3_margin']} B before EXP_LUT @ {hex(EXP_LUT_VA)})")
+    print("Cave 2 symbols:", {k: hex(v) for k, v in info["cave2_syms"].items()})
     print("Cave 3 symbols:", {k: hex(v) for k, v in syms.items()})
 
     md = Cs(CS_ARCH_ARM, CS_MODE_ARM)

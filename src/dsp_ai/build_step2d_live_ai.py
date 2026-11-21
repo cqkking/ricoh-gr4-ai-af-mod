@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Step 2D v1.2.17 live-frame continuous CEVA-XM4 AI AF candidate (Option B)."""
+"""Build Step 2D v1.2.18 K-3 III-tuned live-frame CEVA-XM4 AI AF firmware (Option B)."""
 
 import argparse
 from pathlib import Path
@@ -9,8 +9,8 @@ import build_step2c_slot_poll as slot_build
 import step2c_osd_recovery as osd
 from step2d_live_ai_patcher import apply_live_ai_patch
 
-VERSION = "v1.2.17-step2d-live-ai"
-FW_NAME = "fwdc248b_step2d_live_ai_v1.2.17.bin"
+VERSION = "v1.2.18-step2d-k3-tuning"
+FW_NAME = "fwdc248b_step2d_k3_tuning_v1.2.18.bin"
 
 
 def build_with_manifest(stock: bytes) -> tuple[bytes, dict]:
