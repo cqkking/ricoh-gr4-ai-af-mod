@@ -1,4 +1,4 @@
-"""Executable A32 Unicorn + container tests for Step 2D v1.2.18 K-3 III tuned AI AF (Option B)."""
+"""Executable A32 Unicorn + container tests for Step 2D v1.2.19 K-3 III SPResize & Live Posture AI AF (Option B)."""
 
 import os
 from pathlib import Path
@@ -51,7 +51,7 @@ def _softmax_other_ref(p: int, a: int, b: int) -> tuple[int, int]:
     da, db = p - a, p - b
     ea = lp.EXP_LUT_BYTES[da] if da <= 15 else 0
     eb = lp.EXP_LUT_BYTES[db] if db <= 15 else 0
-    return ea + eb, min(da, db)
+    return ea + eb, da + db
 
 
 def expected_scan_ref(hm: bytes, ref_c: int = 28, ref_r: int = 28):
@@ -75,13 +75,13 @@ def expected_scan_ref(hm: bytes, ref_c: int = 28, ref_r: int = 28):
                 tier, p, a, b, limit, t = 1, c1, c0, c2, lp.CH1_OTHER_MAX, t1
             else:
                 tier, p, a, b, limit, t = 2, c2, c0, c1, lp.CH2_OTHER_MAX, t2
-            other, margin = _softmax_other_ref(p, a, b)
+            other, score = _softmax_other_ref(p, a, b)
             if other > limit:
                 continue
             t[5] += 1
             dist = abs(c - ref_c) + abs(r - ref_r)
-            if (margin, -other, -dist) > (t[0], -t[1], -t[2]):
-                t[0], t[1], t[2], t[3], t[4] = margin, other, dist, c, r
+            if (-other, score, -dist) > (-t[1], t[0], -t[2]):
+                t[0], t[1], t[2], t[3], t[4] = score, other, dist, c, r
 
     def try_tier(tier: int, t: list[int]):
         primary, otherA, otherB = (1, 0, 2) if tier == 1 else (2, 0, 1)
@@ -132,23 +132,23 @@ def expected_scan_ref(hm: bytes, ref_c: int = 28, ref_r: int = 28):
 def expected_v1218_box(
     hm: bytes, width: int = 320, height: int = 212, orient: int = 0, ref_c: int = 28, ref_r: int = 28
 ) -> tuple[int, int, int, int, int]:
-    """Return (left, top, size, prob_pct, tier) for a cold-snap detection."""
+    """Return (left, top, size, prob_pct, tier) for a cold-snap detection under K-3 III 56x38 letterbox."""
     res = expected_scan_ref(hm, ref_c=ref_c, ref_r=ref_r)
     assert res is not None
     tier, prob_pct, uc_q4, ur_q4, span_c, span_r, _ = res
     if orient == 0:
-        sc, sr, sx, sy = uc_q4, ur_q4, span_c, span_r
+        sc, sr = uc_q4, ur_q4
     elif orient == 1:
-        sc, sr, sx, sy = 896 - ur_q4, uc_q4, span_r, span_c
+        sc, sr = 896 - ur_q4, uc_q4
     elif orient == 2:
-        sc, sr, sx, sy = 896 - uc_q4, 896 - ur_q4, span_c, span_r
+        sc, sr = 896 - uc_q4, 896 - ur_q4
     elif orient == 3:
-        sc, sr, sx, sy = ur_q4, 896 - uc_q4, span_r, span_c
+        sc, sr = ur_q4, 896 - uc_q4
     else:
         raise ValueError(orient)
     cx = (sc * width * 585) >> 11
-    cy = (sr * height * 585) >> 11
-    raw = (max(sx * width, sy * height) * 73) >> 4
+    cy = (max(0, sr - 144) * height * 862) >> 11
+    raw = (max(span_c, span_r) * width * 73) >> 4
     if tier == 1:
         size = max(lp.MIN_HEAD_BOX_Q8, min(lp.MAX_HEAD_BOX_Q8, raw))
     else:
@@ -282,7 +282,9 @@ class LiveAiMachine:
         self.u.mem_write(lp.ORIENT_SVC_PTR_VA, words(ORIENT_SVC_VA))
         self.u.mem_write(ORIENT_SVC_VA + 0x518, words(ORIENT_OBJ_VA))
         self.u.mem_write(ORIENT_OBJ_VA, words(ORIENT_BUF_VA))
-        self.u.mem_write(ORIENT_BUF_VA + 0xD8, bytes([raw_val & 0xFF]))
+        # Write stale 0 to Exif +0xD8 and live posture to +0x7DA to prove v1.2.19 reads +0x7DA
+        self.u.mem_write(ORIENT_BUF_VA + 0xD8, b"\x00")
+        self.u.mem_write(ORIENT_BUF_VA + lp.ORIENT_LIVE_OFF, bytes([raw_val & 0xFF]))
 
     def disable_orientation_guard(self) -> None:
         self.u.mem_write(lp.ORIENT_GUARD_VA, words(0))
@@ -544,7 +546,12 @@ class TestStep2DLiveAi(unittest.TestCase):
         self.assertEqual(bytes(m.u.mem_read(lp.HEATMAP_OUT_VA, lp.HEATMAP_LEN)), bytes(lp.HEATMAP_LEN))
 
         tensor = m.u.mem_read(s3.TENSOR_IN_VA, 0x2A00)
-        for (row, col), q in (((10, 10), (0, 0)), ((10, 45), (1, 0)), ((45, 10), (0, 1)), ((45, 45), (1, 1))):
+        # Verify top/bottom K-3 III SPResize letterbox rows 0..8 and 47..55 are black (R=G=B=0)
+        for lb_row in (*range(0, lp.LETTERBOX_ROW_MIN), *range(lp.LETTERBOX_ROW_MAX + 1, 56)):
+            for p_off in (0, 0x0E00, 0x1C00):
+                self.assertEqual(bytes(tensor[p_off + lb_row * 64 : p_off + lb_row * 64 + 64]), bytes(64))
+        # Verify active 3:2 rows 9..46 sample the 4 quadrants with 1:1 square pixels
+        for (row, col), q in (((15, 10), (0, 0)), ((15, 45), (1, 0)), ((40, 10), (0, 1)), ((40, 45), (1, 1))):
             exp_r, exp_g, exp_b = bt601_ref(*quads[q])
             got = (tensor[row * 64 + col], tensor[0x0E00 + row * 64 + col], tensor[0x1C00 + row * 64 + col])
             self.assertEqual(got, (exp_r, exp_g, exp_b), f"pixel ({row},{col}) mismatch")
@@ -593,56 +600,60 @@ class TestStep2DLiveAi(unittest.TestCase):
             self.assertEqual(len(m.calls("send")), 1)
             self.assertEqual(m.word(0x44), 0)
 
-        # 4. NULL / out-of-range U/V pointers fall back to grayscale R==G==B==Y
+        # 4. NULL / out-of-range U/V pointers fall back to grayscale R==G==B==Y in active rows
         m = LiveAiMachine(include_uv=False)
         m.setup_ahip_frame(y_bytes=bytes([77]) * (320 * 212), include_uv=False)
         m.u.mem_write(AHIP_SLOT_VA + 0x08, words(0xE0000000))
         m.u.mem_write(AHIP_SLOT_VA + 0x0C, words(0x20000000))
         m.run_frames(21)
         tensor = m.u.mem_read(s3.TENSOR_IN_VA, 0x2A00)
-        self.assertEqual((tensor[0], tensor[0x0E00], tensor[0x1C00]), (77, 77, 77))
+        self.assertEqual((tensor[0], tensor[0x0E00], tensor[0x1C00]), (0, 0, 0))
+        r9 = lp.LETTERBOX_ROW_MIN * 64
+        self.assertEqual((tensor[r9], tensor[0x0E00 + r9], tensor[0x1C00 + r9]), (77, 77, 77))
 
     def test_k3_exact_softmax_thresholds_and_clutter_rejection(self):
-        # A. Ch1 P = 48.1% (c1=2, c0=0, c2=-1 => e0+e2=276 > 255) REJECTED even with 16 cells
-        cells_48 = []
-        fill_rect(cells_48, 26, 26, 29, 29, 2)
-        ch2_sub = [(c, r, -1) for c, r, _ in cells_48]
-        blob_ch1_48 = make_heatmap_blob(ch1_cells=cells_48, ch2_cells=ch2_sub)
+        # A. Ch1 P = 56.8% (c1=3, c0=0, c2=-1 => e3+e4=127+68=195 > 170) REJECTED even with 16 cells
+        cells_56 = []
+        fill_rect(cells_56, 26, 26, 29, 29, 3)
+        ch2_sub = [(c, r, -1) for c, r, _ in cells_56]
+        blob_ch1_56 = make_heatmap_blob(ch1_cells=cells_56, ch2_cells=ch2_sub)
 
-        # B. Ch1 P = 50.7% (c1=2, c0=0, c2=-2 => 249 <= 255): fails peak >= 60% gate (best_other=249 > 170)
-        ch2_m2 = [(c, r, -2) for c, r, _ in cells_48]
-        blob_ch1_50_no_peak = make_heatmap_blob(ch1_cells=cells_48, ch2_cells=ch2_m2)
+        # B. Ch1 P = 60.5% (c1=4, c0=0, c2=-1 => e4+e5=94+73=167 <= 170): fails peak >= 65% gate (167 > 135)
+        cells_60 = []
+        fill_rect(cells_60, 26, 26, 29, 29, 4)
+        ch2_m1 = [(c, r, -1) for c, r, _ in cells_60]
+        blob_ch1_61_no_peak = make_heatmap_blob(ch1_cells=cells_60, ch2_cells=ch2_m1)
 
         # C. Ch1 scattered 2 cells (< CH1_MIN_LOCAL=3) with high peak REJECTED
         blob_ch1_2cells = make_heatmap_blob(ch1_cells=[(28, 28, 10), (29, 28, 10)])
 
-        # D. Ch1 valid: 50.7% perimeter (2 cells) + 1 peak >= 60% (c1=4, c0=0, c2=-2 => 94+27=121 <= 170) => PASS Tier 1
-        ch1_valid = [(27, 28, 2), (29, 28, 2), (28, 28, 4)]
-        ch2_for_valid = [(27, 28, -2), (29, 28, -2), (28, 28, -2)]
+        # D. Ch1 valid: 60.5% perimeter (2 cells, other=167 <= 170) + 1 peak >= 65% (c1=5, c0=0, c2=-2 => 73+44=117 <= 135)
+        ch1_valid = [(27, 28, 4), (29, 28, 4), (28, 28, 5)]
+        ch2_for_valid = [(27, 28, -1), (29, 28, -1), (28, 28, -2)]
         blob_ch1_valid = make_heatmap_blob(ch1_cells=ch1_valid, ch2_cells=ch2_for_valid)
 
-        # E. Ch2 P = 73.0% (c2=4, c0=0, c1=-20 => 94 > 85) with 12 cells REJECTED (crushes complex clutter!)
+        # E. Ch2 P = 73.0% (c2=4, c0=0, c1=-20 => 94 > 75) with 12 cells REJECTED (crushes complex clutter!)
         cells_ch2_73 = []
         fill_rect(cells_ch2_73, 20, 20, 23, 22, 4)
         ch1_m20 = [(c, r, -20) for c, r, _ in cells_ch2_73]
         blob_ch2_73 = make_heatmap_blob(ch1_cells=ch1_m20, ch2_cells=cells_ch2_73)
 
-        # F. Ch2 P = 77.8% (c2=5, c0=0, c1=-20 => 73 <= 85) with ONLY 5 cells (< 6) REJECTED
-        cells_ch2_5 = [(20 + i, 20, 5) for i in range(5)]
-        blob_ch2_5 = make_heatmap_blob(ch1_cells=[(c, r, -20) for c, r, _ in cells_ch2_5], ch2_cells=cells_ch2_5)
+        # F. Ch2 P = 77.8% (c2=5, c0=0, c1=-20 => 73 <= 75) with ONLY 7 cells (< 8) REJECTED
+        cells_ch2_7 = [(20 + i, 20, 5) for i in range(7)]
+        blob_ch2_7 = make_heatmap_blob(ch1_cells=[(c, r, -20) for c, r, _ in cells_ch2_7], ch2_cells=cells_ch2_7)
 
-        # G. Ch2 P = 77.8% (c2=5, c0=0, c1=-20) with 6 cells (>= 6) PASSES Tier 2!
-        cells_ch2_6 = []
-        fill_rect(cells_ch2_6, 20, 20, 22, 21, 5)
-        blob_ch2_6 = make_heatmap_blob(ch1_cells=[(c, r, -20) for c, r, _ in cells_ch2_6], ch2_cells=cells_ch2_6)
+        # G. Ch2 P = 77.8% (c2=5, c0=0, c1=-20) with 8 cells (>= 8) PASSES Tier 2!
+        cells_ch2_8 = []
+        fill_rect(cells_ch2_8, 20, 20, 23, 21, 5)
+        blob_ch2_8 = make_heatmap_blob(ch1_cells=[(c, r, -20) for c, r, _ in cells_ch2_8], ch2_cells=cells_ch2_8)
 
         # Verify rejected blobs keep box completely hidden (Option B) while DSP keeps running
         for name, bad_blob in (
-            ("ch1_48%", blob_ch1_48),
-            ("ch1_50%_no_60%_peak", blob_ch1_50_no_peak),
+            ("ch1_56%", blob_ch1_56),
+            ("ch1_61%_no_65%_peak", blob_ch1_61_no_peak),
             ("ch1_2cells", blob_ch1_2cells),
             ("ch2_73%", blob_ch2_73),
-            ("ch2_5cells", blob_ch2_5),
+            ("ch2_7cells", blob_ch2_7),
         ):
             with self.subTest(rejected=name):
                 self.assertIsNone(expected_scan_ref(bad_blob))
@@ -653,7 +664,7 @@ class TestStep2DLiveAi(unittest.TestCase):
                 self.assertEqual(m.word(0x24), 0)
                 self.assertTrue(all(fc == 0 for fc, _ in m.osd_snapshots))
 
-        # Verify valid Ch1 borderline (3 cells, peak>=60%, neighbors 50.7%) acquires on 2nd cycle as Tier 1
+        # Verify valid Ch1 borderline (3 cells, peak>=65%, neighbors 61.2%) acquires on 2nd cycle as Tier 1
         m1 = LiveAiMachine(latencies=(1,))
         m1.heatmap_provider = lambda _: blob_ch1_valid
         m1.run_until_cycles(2)
@@ -663,19 +674,33 @@ class TestStep2DLiveAi(unittest.TestCase):
         self.assertEqual(m1.word(0x24), 1)
         self.assertEqual(m1.osd_snapshots[-1], (1, (exp_l, exp_t, exp_s, exp_s)))
 
-        # Verify valid Ch2 77.8% x 6 cells acquires on 2nd cycle as Tier 2
+        # Verify valid Ch2 77.8% x 8 cells acquires on 2nd cycle as Tier 2
         m2 = LiveAiMachine(latencies=(1,))
-        m2.heatmap_provider = lambda _: blob_ch2_6
+        m2.heatmap_provider = lambda _: blob_ch2_8
         m2.run_until_cycles(2)
-        exp_l, exp_t, exp_s, exp_p, exp_tier = expected_v1218_box(blob_ch2_6)
+        exp_l, exp_t, exp_s, exp_p, exp_tier = expected_v1218_box(blob_ch2_8)
         self.assertEqual(exp_tier, 2)
         self.assertEqual(m2.word(0x38), (2 << 16) | exp_p)
         self.assertEqual(m2.osd_snapshots[-1], (1, (exp_l, exp_t, exp_s, exp_s)))
 
+        # H. Probability-first ranking: face cluster (c1=8, c2=4, c0=0 -> other=118, P=68%, min(da,db)=4)
+        # MUST beat noisy body/edge cluster (c1=5, c2=0, c0=0 -> other=146, P=64%, min(da,db)=5)!
+        face_ch1 = [(40 + dc, 28, 8) for dc in (-1, 0, 1)]
+        face_ch2 = [(40 + dc, 28, 4) for dc in (-1, 0, 1)]
+        edge_ch1 = [(14 + dc, 28, 5) for dc in (-1, 0, 1)]
+        blob_face_vs_edge = make_heatmap_blob(ch1_cells=face_ch1 + edge_ch1, ch2_cells=face_ch2)
+        m3 = LiveAiMachine(latencies=(1,))
+        m3.heatmap_provider = lambda _: blob_face_vs_edge
+        m3.run_until_cycles(2)
+        fc3, rect3 = m3.osd_snapshots[-1]
+        self.assertEqual(fc3, 1)
+        # Box MUST lock onto face cluster at col 40 (right side), NOT noisy edge at col 14 (left side)!
+        self.assertGreater(rect3[0] + (rect3[2] >> 1), (320 << 8) // 2)
+
     def test_strict_ch1_head_priority_blocks_stronger_ch2_body(self):
         ch1 = []
         ch2 = []
-        fill_rect(ch1, 13, 13, 15, 15, 8)   # 3x3 head (~88% P(Ch1)) at (14, 14)
+        fill_rect(ch1, 13, 14, 15, 16, 8)   # 3x3 head (~88% P(Ch1)) at (14, 15) inside active letterbox rows
         fill_rect(ch2, 34, 34, 43, 43, 20)  # Huge stronger 10x10 body (~99%) at (38, 38)
         blob = make_heatmap_blob(ch1_cells=ch1, ch2_cells=ch2)
 
@@ -696,10 +721,10 @@ class TestStep2DLiveAi(unittest.TestCase):
                 self.assertLess(rect[1] + (rect[3] >> 1), (height << 8) // 2)
 
     def test_plateau_centroid_eliminates_top_left_drift_and_rejects_second_subject(self):
-        # Uniform saturated 8x8 Ch1 plateau at [10..17] x [12..19] PLUS distant 2nd face at [42..47] x [40..45]
+        # Uniform saturated 8x8 Ch1 plateau at [10..17] x [14..21] PLUS distant 2nd face at [42..47] x [38..43]
         ch1 = []
-        fill_rect(ch1, 10, 12, 17, 19, 20)
-        fill_rect(ch1, 42, 40, 47, 45, 18)
+        fill_rect(ch1, 10, 14, 17, 21, 20)
+        fill_rect(ch1, 42, 38, 47, 43, 18)
         blob = make_heatmap_blob(ch1_cells=ch1)
 
         m = LiveAiMachine(width=320, height=212, latencies=(1,))
@@ -710,12 +735,12 @@ class TestStep2DLiveAi(unittest.TestCase):
         self.assertEqual(fc, 1)
         self.assertEqual(rect, (exp_l, exp_t, exp_s, exp_s))
 
-        # Geometric center of [10..17] x [12..19] is (14.0, 16.0) / 56 -> (80 px, 60.5 px) in Q8
-        # Verify NOT stuck at top-left corner (10, 12) and NOT pulled toward 2nd face (44, 42)
+        # Geometric center of [10..17] x [14..21] is s_c=14.0/56, s_r=18.0 -> active_r=(18.0-9.0)/38=9.0/38
+        # Verify NOT stuck at top-left corner and NOT pulled toward 2nd face
         cx_px = (rect[0] + (rect[2] >> 1)) / 256.0
         cy_px = (rect[1] + (rect[3] >> 1)) / 256.0
         self.assertAlmostEqual(cx_px, 14.0 * 320 / 56, delta=2.0)
-        self.assertAlmostEqual(cy_px, 16.0 * 212 / 56, delta=2.0)
+        self.assertAlmostEqual(cy_px, (18.0 - 9.0) * 212 / 38, delta=2.0)
 
     def test_portrait_and_180_orientation_rotation_and_inverse_mapping(self):
         w, h = 320, 212
@@ -732,9 +757,9 @@ class TestStep2DLiveAi(unittest.TestCase):
                 else:
                     y[r * w + c] = 220
 
-        # Head placed in CNN top-center (cnn_c = 27..29, cnn_r = 7..9)
+        # Head placed in CNN upright active top-center (cnn_c = 27..29, cnn_r = 12..14)
         ch1 = []
-        fill_rect(ch1, 27, 7, 29, 9, 10)
+        fill_rect(ch1, 27, 12, 29, 14, 10)
         head_blob = make_heatmap_blob(ch1_cells=ch1)
 
         # Also test tilt orientation 4 ('TU') preserves previous orientation 1 ('L'),
@@ -757,8 +782,13 @@ class TestStep2DLiveAi(unittest.TestCase):
                     m.run_until_cycles(2)
 
                 tensor = m.u.mem_read(s3.TENSOR_IN_VA, 0x2A00)
+                # Active top-left pixel after letterbox rotation:
+                # orient 0/2 have top/bottom letterbox rows 0..8 & 47..55 -> active TL at (row=12, col=2)
+                # orient 1/3 have left/right letterbox cols 0..8 & 47..55 -> active TL at (row=2, col=12)
+                tl_off = (12 * 64 + 2) if (eff_orient % 2 == 0) else (2 * 64 + 12)
                 expected_tl_y = {0: 20, 1: 80, 2: 220, 3: 150}[eff_orient]
-                self.assertEqual(tensor[2 * 64 + 2], expected_tl_y)
+                self.assertEqual(tensor[tl_off], expected_tl_y)
+                self.assertEqual(tensor[2 * 64 + 2], 0)  # letterbox corner is always black (0)
                 for p_off in (0, 0x0E00, 0x1C00):
                     for r in range(56):
                         self.assertEqual(bytes(tensor[p_off + r * 64 + 56 : p_off + r * 64 + 64]), bytes(8))
@@ -771,13 +801,13 @@ class TestStep2DLiveAi(unittest.TestCase):
                 cx = rect[0] + (rect[2] >> 1)
                 cy = rect[1] + (rect[3] >> 1)
                 if eff_orient == 0:
-                    self.assertLess(cy, (h << 8) // 4)
+                    self.assertLess(cy, (h << 8) // 3)
                 elif eff_orient == 1:
-                    self.assertGreater(cx, (w << 8) * 3 // 4)
+                    self.assertGreater(cx, (w << 8) * 2 // 3)
                 elif eff_orient == 2:
-                    self.assertGreater(cy, (h << 8) * 3 // 4)
+                    self.assertGreater(cy, (h << 8) * 2 // 3)
                 elif eff_orient == 3:
-                    self.assertLess(cx, (w << 8) // 4)
+                    self.assertLess(cx, (w << 8) // 3)
 
     def test_2_cycle_cold_debounce_deadband_and_smooth_ema(self):
         m = LiveAiMachine(latencies=(1,))

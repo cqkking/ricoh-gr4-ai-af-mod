@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Step 2D v1.2.18: K-3 III official softmax, priority, orientation & local centroid AI AF (Option B).
+"""Step 2D v1.2.19: K-3 III SPResize 1:1 aspect letterboxing, live posture +0x7da & probability-first AI AF (Option B).
 
-Builds on the real-hardware-verified v1.2.15 OSD-commit-first lifecycle and v1.2.17
-AHIP IMAGE2 live-frame pipeline, porting Pentax K-3 Mark III v2.20's exact official
-3-channel heatmap rules and tracking behavior:
-- Lock-free gravity posture read via GR IV CameraPostureService (0x5537B298 / 0x5537B2A0
-  -> [+0x518] -> [0] + 0xd8) with DDR range guards, rotating the 56x56 planar RGB input
-  upright using K-3 III's exact (start, c_step, r_step) tables (0x539323d4/2278/2290);
-- Exact 3-class softmax via 16-byte exp(-0.25*d)*256 LUT @ EXP_LUT_VA (0x53001FF0):
-  - Strict Tier 1 (Ch1 Head/Face/Cat Face): P(Ch1) > 50% (other <= 255), peak >= 60%
-    (other <= 170), >= 3 cells in +-9 local cluster; strictly blocks Tier 2 when hit;
-  - Strict Tier 2 (Ch2 Body/Back/Profile fallback): P(Ch2) > 75% (other <= 85),
-    >= 6 cells in +-10 local cluster;
-- 2-iteration local mean-shift probability-weighted sub-pixel centroid in Q4 (eliminates
-  top-left Q2 plateau tie drift and second-subject interference), inverse-rotated back to
-  sensor coordinates;
-- Tight local-span box sizing (head 30..56 px, body 36..60 px), 2-cycle cold confirmation,
-  position/size deadbands (2.5 px / 3.0 px), smooth EMA, 3-cycle hold + Option B hide.
+Builds on the real-hardware-verified v1.2.15 OSD-commit-first lifecycle and v1.2.17/v1.2.18
+AHIP IMAGE2 live-frame pipeline, fixing the 3 root causes uncovered by disassembling K-3 III
+v2.20 and GR IV v1.20 RTOS:
+1. Lock-free LiveView gravity posture read via GR IV CameraPostureService (0x5537B298 /
+   0x5537B2A0 -> [+0x518] -> [0] + 0x7da, matching 0x5377d960 / 0x538b40c8 instead of the
+   still-capture Exif MakerNote offset +0xd8), rotating the 56x56 planar RGB input upright
+   using K-3 III's exact (start, c_step, r_step) tables (0x539323d4/2278/2290);
+2. K-3 III Retouch::SPResize (0x530acfa0..0x530ad528) exact 1:1 square-pixel letterboxing
+   for 3:2 frames: active sensor rows s_r = 9..46 map to 0..fd_h (centered 56x38 in landscape,
+   38x56 in portrait), while out-of-bounds letterbox rows s_r = 0..8 and 47..55 are padded
+   with neutral black (R=0, G=0, B=0) and inverse-mapped identically in sub_update_tracking_box;
+3. Exact 3-class softmax via 16-byte exp(-0.25*d)*256 LUT @ EXP_LUT_VA (0x53001FF0) with
+   K-3 III probability-first ranking (other = ea + eb < primary, log_odds = da + db > tie-break,
+   distance < tie-break):
+   - Strict Tier 1 (Ch1 Head/Face/Cat Face): P(Ch1) >= 60% (other <= 170), peak >= 65%
+     (other <= 135), >= 3 cells in +-6 local cluster; strictly blocks Tier 2 when hit;
+   - Strict Tier 2 (Ch2 Body/Back/Profile fallback): P(Ch2) >= 77% (other <= 75),
+     >= 8 cells in +-8 local cluster;
+4. 2-iteration local mean-shift probability-weighted sub-pixel centroid in Q4, tight local-span
+   box sizing (head 28..52 px, body 34..56 px), 2-cycle cold confirmation, position/size
+   deadbands (2.5 px / 3.0 px), smooth EMA, 3-cycle hold + Option B hide.
 """
 
 import struct
@@ -32,24 +37,29 @@ LOAD_RETRY_MASK = 0x3F       # Retry LoadDsp every 64 frames on cold storage del
 MAX_POLL_FRAMES = 30
 LOST_HOLD_CYCLES = 3         # Hold box for 3 empty cycles, hide on 4th (Option B)
 
-# GR IV CameraPostureService globals (verified from 0x53750008 / 0x5377b1b0 / 0x537818a8)
+# GR IV CameraPostureService globals (verified from 0x53750008 / 0x5377d960 / 0x53782114 / 0x538b40c8)
 ORIENT_GUARD_VA = 0x5537B298
 ORIENT_SVC_PTR_VA = 0x5537B2A0  # ORIENT_GUARD_VA + 8
+ORIENT_LIVE_OFF = 0x7DA         # Live gravity posture byte ([buf + 0x7da]: 0=0deg, 1=90CW, 2=180, 3=90CCW)
+
+# K-3 III Retouch::SPResize (0x530acfa0..0x530ad528) 1:1 aspect-ratio letterbox bounds for 3:2 frames
+LETTERBOX_ROW_MIN = 9        # Active 3:2 sensor rows inside 56x56 grid: s_r = 9..46 (38 rows)
+LETTERBOX_ROW_MAX = 46       # Rows 0..8 and 47..55 are padded with black (R=0, G=0, B=0)
 
 # K-3 III exact softmax sensitivity, cluster, sizing, and anti-jitter constants
-CH1_OTHER_MAX = 255          # e0 + e2 <= 255 <=> P(Ch1) > 50% (#0x32)
-CH1_PEAK_OTHER_MAX = 170     # e0 + e2 <= 170 <=> peak P(Ch1) >= 60%
-CH1_MIN_LOCAL = 3            # Minimum local +-9 cluster cell count for Ch1 head/face
-CH2_OTHER_MAX = 85           # e0 + e1 <= 85  <=> P(Ch2) > 75% (#0x4b)
-CH2_MIN_LOCAL = 6            # Minimum local +-10 cluster cell count for Ch2 body fallback
-LOCAL_RADIUS_CH1 = 9
-LOCAL_RADIUS_CH2 = 10
+CH1_OTHER_MAX = 170          # e0 + e2 <= 170 <=> P(Ch1) >= 60%
+CH1_PEAK_OTHER_MAX = 135     # e0 + e2 <= 135 <=> peak P(Ch1) >= 65%
+CH1_MIN_LOCAL = 3            # Minimum local +-6 cluster cell count for Ch1 head/face
+CH2_OTHER_MAX = 75           # e0 + e1 <= 75  <=> P(Ch2) >= 77%
+CH2_MIN_LOCAL = 8            # Minimum local +-8 cluster cell count for Ch2 body fallback
+LOCAL_RADIUS_CH1 = 6
+LOCAL_RADIUS_CH2 = 8
 ACQ_CONFIRM_CYCLES = 2       # Cold start has_box 0 -> 1 confirmation cycles
 
-MIN_HEAD_BOX_Q8 = 0x1E00     # 30 px
-MAX_HEAD_BOX_Q8 = 0x3800     # 56 px
-MIN_BODY_BOX_Q8 = 0x2400     # 36 px
-MAX_BODY_BOX_Q8 = 0x3C00     # 60 px
+MIN_HEAD_BOX_Q8 = 0x1C00     # 28 px
+MAX_HEAD_BOX_Q8 = 0x3400     # 52 px
+MIN_BODY_BOX_Q8 = 0x2200     # 34 px
+MAX_BODY_BOX_Q8 = 0x3800     # 56 px
 POS_DEADBAND_Q8 = 0x280      # 2.5 px position deadband
 SIZE_DEADBAND_Q8 = 0x300     # 3.0 px size deadband
 
@@ -274,7 +284,7 @@ def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]
     ))
     b("orient_keep", cond=0x2)
     insns.extend((
-        0xE5D130D8,  # ldrb r3, [r1, #0xd8] (raw posture)
+        0xE5D137DA,  # ldrb r3, [r1, #0x7da] (live gravity posture @ +0x7da)
         0xE3530003,  # cmp  r3, #3 (preserve last_orient on TU/TD/--)
         0x91A00003,  # movls r0, r3
         0x95880040,  # strls r0, [r8, #0x40]
@@ -301,28 +311,45 @@ def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]
         0xE58D2018,  # str  r2, [sp, #24] (r_step)
     ))
 
-    # Pixel-center BT.601 YUV420 -> rotated upright 56x56 (stride 64) planar RGB @ TENSOR_IN_VA
+    # K-3 III SPResize 1:1 aspect-ratio letterboxed YUV420 -> rotated upright 56x56 (stride 64) planar RGB @ TENSOR_IN_VA
+    # Zero entire 0x7200 work buffer (TENSOR_IN_VA + HEATMAP_OUT_VA) first:
+    # clears letterbox sensor rows 0..8 & 47..55 (R=G=B=0), stride-64 pad cols 56..63, and output heatmap.
     ldr32(9, s3.TENSOR_IN_VA)
     insns.extend((
-        0xE0899006,  # add  sb, sb, r6
-        0xE3A06000,  # mov  r6, #0
+        0xE3A00000,  # mov  r0, #0
+        s3.encode_movw(3, WORK_BUF_FLUSH_LEN),
+    ))
+    mark("ds_zero_work")
+    insns.extend((
+        0xE2533004,  # subs r3, r3, #4
+        0xE7890003,  # str  r0, [sb, r3]
+    ))
+    b("ds_zero_work", cond=0x1)
+
+    insns.extend((
+        0xE0899006,  # add  sb, sb, r6          (TENSOR_IN_VA + orient start offset)
+        0xE0823182,  # add  r3, r2, r2, lsl #3  (9 * r_step: advance past top 9 letterbox rows)
+        0xE0899003,  # add  sb, sb, r3
+        0xE3A06000,  # mov  r6, #0              (active_r = 0..37 for sensor rows 9..46)
     ))
 
     mark("ds_row_loop")
     insns.extend((
-        0xE0860006,  # add  r0, r6, r6
-        0xE2800001,  # add  r0, r0, #1
-        0xE0000095,  # mul  r0, r5, r0
-        0xE3A01049,  # mov  r1, #73
+        0xE0860006,  # add  r0, r6, r6          (2 * active_r)
+        0xE2800001,  # add  r0, r0, #1          (2 * active_r + 1)
+        0xE0000095,  # mul  r0, r5, r0          (fd_h * (2 * active_r + 1))
+        0xE3A0106C,  # mov  r1, #108            (108 / 8192 = 1 / 75.852 -> 38 active rows)
         0xE0000091,  # mul  r0, r1, r0
         0xE1A006A0,  # lsr  r0, r0, #13
+        0xE1500005,  # cmp  r0, r5
+        0x22450001,  # subhs r0, r5, #1
         0xE0287490,  # mla  r8, r0, r4, r7
         0xE1A010A0,  # lsr  r1, r0, #1
         0xE1A020A4,  # lsr  r2, r4, #1
         0xE0010192,  # mul  r1, r2, r1
         0xE58D1010,  # str  r1, [sp, #16]
-        0xE1A0B009,  # mov  fp, sb           (dst_px_ptr)
-        0xE3A0A000,  # mov  sl, #0           (col = 0)
+        0xE1A0B009,  # mov  fp, sb              (dst_px_ptr)
+        0xE3A0A000,  # mov  sl, #0              (col = 0)
     ))
 
     mark("ds_col_loop")
@@ -391,42 +418,9 @@ def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]
         0xE59D0018,  # ldr  r0, [sp, #24]
         0xE0899000,  # add  sb, sb, r0
         0xE2866001,  # add  r6, r6, #1
-        0xE3560038,  # cmp  r6, #56
+        0xE3560000 | (LETTERBOX_ROW_MAX - LETTERBOX_ROW_MIN + 1),  # cmp r6, #38
     ))
     b("ds_row_loop", cond=0xB)
-
-    # Clear cols 56..63 across all 56 CNN rows & 3 planes regardless of orientation
-    ldr32(0, s3.TENSOR_IN_VA)
-    insns.extend((
-        0xE3A01000,
-        0xE3A02038,
-    ))
-    mark("ds_pad_loop")
-    insns.extend((
-        0xE5801038,
-        0xE580103C,
-        0xE2803C0E,
-        0xE5831038,
-        0xE583103C,
-        0xE2833C0E,
-        0xE5831038,
-        0xE583103C,
-        0xE2800040,
-        0xE2522001,
-    ))
-    b("ds_pad_loop", cond=0x1)
-
-    ldr32(0, HEATMAP_OUT_VA)
-    insns.extend((
-        0xE3A01000,
-        s3.encode_movw(2, HEATMAP_LEN),
-    ))
-    mark("ds_zero_hm")
-    insns.extend((
-        0xE2522004,
-        0xE7801002,
-    ))
-    b("ds_zero_hm", cond=0x1)
 
     call(s3.GET_CACHE_MGR_VA)
     ldr32(1, s3.TENSOR_IN_VA)
@@ -454,8 +448,8 @@ def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]
     mark("sub_scan_heatmap")
     # 9 regs (36 B) + 68 B locals = 104 B (8-byte aligned)
     # Pass 1 locals:
-    #   [sp+0..20]  = t1: margin(-1), other, dist, best_c, best_r, cnt(0)
-    #   [sp+24..44] = t2: margin(-1), other, dist, best_c, best_r, cnt(0)
+    #   [sp+0..20]  = t1: score(-1), other(999), dist, best_c, best_r, cnt(0)
+    #   [sp+24..44] = t2: score(-1), other(999), dist, best_c, best_r, cnt(0)
     #   [sp+48]=ref_c, [sp+52]=ref_r, [sp+56]=best_other, [sp+60]=row_prev_cnt
     insns.extend((
         0xE92D4FF0,  # push {r4, r5, r6, r7, r8, sb, sl, fp, lr}
@@ -481,16 +475,19 @@ def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]
         0x83A0201C,  # movhi r2, #28
         0xE58D1030,  # str   r1, [sp, #48]     (ref_c)
         0xE58D2034,  # str   r2, [sp, #52]     (ref_r)
-        0xE3E00000,  # mvn   r0, #0            (-1: first hit unconditionally wins bgt)
+        0xE3E00000,  # mvn   r0, #0            (-1: best_score init)
+        s3.encode_movw(1, 999),  # 999: best_other init (first valid hit unconditionally wins blo)
         0xE3A03000,  # mov   r3, #0
-        0xE58D0000,  # str   r0, [sp, #0]      (t1_margin)
-        0xE58D0018,  # str   r0, [sp, #24]     (t2_margin)
+        0xE58D0000,  # str   r0, [sp, #0]      (t1_score = -1)
+        0xE58D1004,  # str   r1, [sp, #4]      (t1_other = 999)
+        0xE58D0018,  # str   r0, [sp, #24]     (t2_score = -1)
+        0xE58D101C,  # str   r1, [sp, #28]     (t2_other = 999)
         0xE58D3014,  # str   r3, [sp, #20]     (t1_cnt = 0)
         0xE58D302C,  # str   r3, [sp, #44]     (t2_cnt = 0)
         0xE3A06000,  # mov   r6, #0            (row = 0)
     ))
 
-    # Unified Pass 1: only strict argmax (c1 > c2 or c2 > c1) can satisfy P > 50% or P > 75%
+    # Unified Pass 1: only strict argmax (c1 > c2 or c2 > c1) can satisfy P >= 60% or P >= 77%
     mark("p1_row_loop")
     insns.append(0xE3A07000)  # mov r7, #0 (col = 0)
     mark("p1_col_loop")
@@ -512,11 +509,11 @@ def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]
         0xB3A03002,  # movlt r3, #2            (tier = 2)
         0xE1A0100C,  # mov   r1, ip            (a = c0)
     ))
-    call(cave2_syms["softmax_other"])  # r0=other (999 if not argmax), r1=margin, r3 preserved
+    call(cave2_syms["softmax_other"])  # r0=other (999 if not argmax), r1=da+db (log-odds score), r3 preserved
     insns.extend((
         0xE3530001,  # cmp   r3, #1
-        0x03A0C000 | CH1_OTHER_MAX,  # moveq ip, #255
-        0x13A0C000 | CH2_OTHER_MAX,  # movne ip, #85
+        0x03A0C000 | CH1_OTHER_MAX,  # moveq ip, #170
+        0x13A0C000 | CH2_OTHER_MAX,  # movne ip, #75
         0xE150000C,  # cmp   r0, ip
     ))
     b("p1_next", cond=0x8)  # bhi
@@ -527,7 +524,7 @@ def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]
         0xE59BC014,  # ldr   ip, [fp, #20]
         0xE28CC001,  # add   ip, ip, #1
         0xE58BC014,  # str   ip, [fp, #20]     (cnt++)
-        # Compare lexicographic (margin >, other <, dist <)
+        # Compare K-3 III probability-first lexicographic (other <, score = da+db >, dist <)
         0xE59D2030,  # ldr   r2, [sp, #48]     (ref_c)
         0xE0572002,  # subs  r2, r7, r2
         0x42622000,  # rsbmi r2, r2, #0
@@ -535,17 +532,17 @@ def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]
         0xE056C00C,  # subs  ip, r6, ip
         0x426CC000,  # rsbmi ip, ip, #0
         0xE082200C,  # add   r2, r2, ip        (dist)
-        0xE59B3000,  # ldr   r3, [fp, #0]      (best_margin)
+        0xE59B3004,  # ldr   r3, [fp, #4]      (best_other)
+        0xE1500003,  # cmp   r0, r3
+    ))
+    b("p1_next", cond=0x8)  # bhi (larger other = lower softmax probability)
+    b("p1_take", cond=0x3)  # blo (smaller other = higher softmax probability!)
+    insns.extend((
+        0xE59B3000,  # ldr   r3, [fp, #0]      (best_score = da + db)
         0xE1510003,  # cmp   r1, r3
     ))
     b("p1_next", cond=0xB)  # blt
     b("p1_take", cond=0xC)  # bgt
-    insns.extend((
-        0xE59B3004,  # ldr   r3, [fp, #4]      (best_other)
-        0xE1500003,  # cmp   r0, r3
-    ))
-    b("p1_next", cond=0x8)  # bhi
-    b("p1_take", cond=0x3)  # blo
     insns.extend((
         0xE59B3008,  # ldr   r3, [fp, #8]      (best_dist)
         0xE1520003,  # cmp   r2, r3
@@ -553,7 +550,7 @@ def _build_cave3_body(cave2_syms: dict[str, int]) -> tuple[bytes, dict[str, int]
     b("p1_next", cond=0x2)  # bhs
     mark("p1_take")
     insns.extend((
-        0xE58B1000,  # str   r1, [fp, #0]      (margin)
+        0xE58B1000,  # str   r1, [fp, #0]      (score = da + db)
         0xE58B0004,  # str   r0, [fp, #4]      (other)
         0xE58B2008,  # str   r2, [fp, #8]      (dist)
         0xE58B700C,  # str   r7, [fp, #12]     (best_c)
@@ -1331,38 +1328,36 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> tuple[bytes
         0xE35C0003,  # orient 3 ('R')?
         0x01A08002,  # moveq r8, r2
         0x004E9001,  # subeq sb, lr, r1
-        # span_x, span_y depend only on orient & 1 (swap on 1 or 3)
-        0xE31C0001,  # tst ip, #1
-        0xE20310FF,  # r1 = span_c
-        0xE1A02423,  # lsr r2, r3, #8
-        0xE20220FF,  # r2 = span_r
-        0x11A0E001,  # movne lr, r1 (swap r1 <-> r2 on portrait)
-        0x11A01002,  # movne r1, r2
-        0x11A0200E,  # movne r2, lr
-        # Sub-pixel Q8 center & tight local-span Q8 box size
+        # Sub-pixel Q8 center (K-3 III 56x38 letterbox: s_c_q4 in 0..896, s_r_q4 in 144..752)
         s3.encode_movw(14, 585),
-        0xE0080896,  # mul r8, r6, r8
-        0xE008089E,  # mul r8, lr, r8
-        0xE1A085A8,  # lsr r8, r8, #11
-        0xE0090997,  # mul sb, r7, sb
-        0xE009099E,  # mul sb, lr, sb
-        0xE1A095A9,  # lsr sb, sb, #11
-        0xE0010196,  # span_x * fd_w
-        0xE0020297,  # span_y * fd_h
-        0xE1510002,
-        0xB1A01002,
-        0xE3A0C049,
-        0xE00A0C91,
-        0xE1A0A22A,  # raw
-        0xE3550001,
+        0xE0080896,  # mul   r8, r6, r8
+        0xE008089E,  # mul   r8, lr, r8
+        0xE1A085A8,  # lsr   r8, r8, #11      (cx_q8)
+        0xE2599090,  # subs  sb, sb, #144     (s_r_q4 - 9*16 letterbox top bar)
+        0x43A09000,  # movmi sb, #0
+        s3.encode_movw(14, 862),
+        0xE0090997,  # mul   sb, r7, sb
+        0xE009099E,  # mul   sb, lr, sb
+        0xE1A095A9,  # lsr   sb, sb, #11      (cy_q8 across 38 active rows = 608 Q4 units)
+        # Isotropic 1:1 square-pixel Q8 box size from max(span_c, span_r) * fd_w / 56
+        0xE20310FF,  # and   r1, r3, #0xff    (span_c)
+        0xE1A02423,  # lsr   r2, r3, #8
+        0xE20220FF,  # and   r2, r2, #0xff    (span_r)
+        0xE1510002,  # cmp   r1, r2
+        0xB1A01002,  # movlt r1, r2           (max_span)
+        0xE0010196,  # mul   r1, r6, r1       (max_span * fd_w)
+        0xE3A0C049,  # mov   ip, #73
+        0xE00A0C91,  # mul   sl, r1, ip
+        0xE1A0A22A,  # lsr   sl, sl, #4       (raw_size_q8)
+        0xE3550001,  # cmp   r5, #1
         0x108AA08A,  # addne sl, sl, sl, lsl #1
-        0x11A0A12A,  # lsrne sl, sl, #2      (Tier 2: raw = (raw * 3) >> 2)
-        0x03A0CC1E,  # moveq ip, #0x1e00     (MIN_HEAD_BOX_Q8)
-        0x13A0CC24,  # movne ip, #0x2400     (MIN_BODY_BOX_Q8)
+        0x11A0A12A,  # lsrne sl, sl, #2       (Tier 2: raw = (raw * 3) >> 2)
+        0x03A0CC1C,  # moveq ip, #0x1c00      (MIN_HEAD_BOX_Q8)
+        0x13A0CC22,  # movne ip, #0x2200      (MIN_BODY_BOX_Q8)
         0xE15A000C,  # cmp   sl, ip
         0xB1A0A00C,  # movlt sl, ip
-        0x03A0CC38,  # moveq ip, #0x3800     (MAX_HEAD_BOX_Q8)
-        0x13A0CC3C,  # movne ip, #0x3c00     (MAX_BODY_BOX_Q8)
+        0x03A0CC34,  # moveq ip, #0x3400      (MAX_HEAD_BOX_Q8)
+        0x13A0CC38,  # movne ip, #0x3800      (MAX_BODY_BOX_Q8)
         0xE15A000C,  # cmp   sl, ip
         0xC1A0A00C,  # movgt sl, ip
     ))
@@ -1497,7 +1492,7 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> tuple[bytes
     ))
 
     # ---------------------------------------------------------------------
-    # Shared leaf helper: softmax_other(r0=p, r1=a, r2=b) -> r0=other (or 999), r1=margin
+    # Shared leaf helper: softmax_other(r0=p, r1=a, r2=b) -> r0=other (or 999), r1=da+db
     # Preserves r3 and all callee-saved registers.
     # ---------------------------------------------------------------------
     mark("softmax_other")
@@ -1520,8 +1515,7 @@ def _build_live_ai_core(core_va: int, cave3_syms: dict[str, int]) -> tuple[bytes
         0x97DCC002,  # ldrlsb ip, [ip, r2]
         0x83A0C000,  # movhi  ip, #0
         0xE080000C,  # add    r0, r0, ip (other = ea + eb)
-        0xE1510002,  # cmp    r1, r2
-        0xC1A01002,  # movgt  r1, r2     (margin = min(da, db))
+        0xE0811002,  # add    r1, r1, r2 (score = da + db)
         0xE12FFF1E,  # bx     lr
     ))
     mark("sm_fail")
@@ -1652,7 +1646,7 @@ def build_live_ai_cave2() -> bytes:
 
 
 def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> dict:
-    """Apply Step 2D v1.2.18 K-3 III tuned live AI AF patch non-destructively inside RTOS."""
+    """Apply Step 2D v1.2.19 K-3 III SPResize & Live Posture AI AF patch non-destructively inside RTOS."""
     if not __debug__:
         raise RuntimeError("Stage 3 preflight uses assertions; do not run with python -O")
     update_off = rtos_start + HOOK_UPDATE_VA - s3.GR4_BASE
@@ -1692,7 +1686,7 @@ def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> d
     payload[:] = check
     info = cave_layout()
     manifest.update({
-        "stage": "Step 2D v1.2.18: K-3 III Official Softmax, Priority, Orientation & Local Centroid AI AF (Option B)",
+        "stage": "Step 2D v1.2.19: K-3 III SPResize 56x38 Letterbox, Live Posture (+0x7da) & Softmax Probability AI AF (Option B)",
         "post_update_hook": {
             "va": hex(HOOK_UPDATE_VA),
             "offset": hex(update_off),
@@ -1721,11 +1715,15 @@ def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> d
         "heatmap_len": hex(HEATMAP_LEN),
         "work_buf_flush_len": hex(WORK_BUF_FLUSH_LEN),
         "k3_tuning": {
+            "orient_live_off": hex(ORIENT_LIVE_OFF),
+            "letterbox_rows": [LETTERBOX_ROW_MIN, LETTERBOX_ROW_MAX],
             "ch1_other_max": CH1_OTHER_MAX,
             "ch1_peak_other_max": CH1_PEAK_OTHER_MAX,
             "ch1_min_local": CH1_MIN_LOCAL,
+            "local_radius_ch1": LOCAL_RADIUS_CH1,
             "ch2_other_max": CH2_OTHER_MAX,
             "ch2_min_local": CH2_MIN_LOCAL,
+            "local_radius_ch2": LOCAL_RADIUS_CH2,
             "acq_confirm_cycles": ACQ_CONFIRM_CYCLES,
             "lost_hold_cycles": LOST_HOLD_CYCLES,
             "head_box_q8": [MIN_HEAD_BOX_Q8, MAX_HEAD_BOX_Q8],
