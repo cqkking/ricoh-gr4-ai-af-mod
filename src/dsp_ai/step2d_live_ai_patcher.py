@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Step 2D v1.2.16: Live-frame continuous CEVA-XM4 AI subject-tracking AF (Option B).
+"""Step 2D v1.2.17: Live-frame continuous CEVA-XM4 AI subject-tracking AF (Option B).
 
 Builds on the real-hardware-verified v1.2.15 OSD-commit-first architecture and
 Pentax K-3 III Start -> SendMessage(4) -> 0x1f/Slot-Poll -> WaitMessage(0) -> Stop(100)
 lifecycle, adding:
 - Live GR IV AHIP YUV420 frame extraction (*([0x55081350 + 0x424]), Y@+0x04, U@+0x08, V@+0x0c)
-  with strict null, DDR-range (0x40000000..0x60000000), dimension, and D-Cache guards;
+  with strict null, GR IV DDR-range (0x40000000..0xe0000000 covering RTOS, IMAGE1, and IMAGE2),
+  dimension, and D-Cache guards;
 - Pixel-center BT.601 YUV420 -> 56x56 (stride 64) planar RGB downsampler into 0x52b00000;
 - True K-3 III 3-channel 56x56 int16_t (Q2) segmentation heatmap scanner at 0x52b09a00
   (Ch0 background, Ch1 human/head priority, Ch2 animal/body);
@@ -24,8 +25,8 @@ LIVE_AI_COOKIE = 0x41493244  # "AI2D"
 WARMUP_FRAMES = 20
 LOAD_RETRY_MASK = 0x3F       # Retry LoadDsp every 64 frames on cold storage delay
 MAX_POLL_FRAMES = 30
-PEAK_THRESH = 4              # +1.0 logit in Q2 (0.25/LSB)
-AREA_THRESH = 3              # Minimum foreground cells (out of 56x56)
+PEAK_THRESH = 3              # +0.75 logit in Q2 (0.25/LSB)
+AREA_THRESH = 2              # Minimum foreground cells (out of 56x56)
 LOST_HOLD_CYCLES = 3         # Hold box for 3 empty cycles, hide on 4th (Option B)
 MIN_BOX_Q8 = 0x2800          # 40 px in Q8
 MAX_BOX_Q8 = 0x5800          # 88 px in Q8
@@ -168,11 +169,11 @@ def build_live_ai_cave3() -> tuple[bytes, dict[str, int]]:
     ))
     b("sample_fail", cond=0x1)
 
-    # slot_pp = [ahip + 0x424]; check 0x40000000 <= ptr < 0x60000000
+    # slot_pp = [ahip + 0x424]; check 0x40000000 <= ptr < 0xe0000000 (RTOS + IMAGE1 + IMAGE2)
     insns.extend((
         0xE5961424,  # ldr  r1, [r6, #0x424]
         0xE2412101,  # sub  r2, r1, #0x40000000
-        0xE3520202,  # cmp  r2, #0x20000000
+        0xE352020A,  # cmp  r2, #0xa0000000
     ))
     b("sample_fail", cond=0x2)  # bhs
 
@@ -180,7 +181,7 @@ def build_live_ai_cave3() -> tuple[bytes, dict[str, int]]:
     insns.extend((
         0xE5911000,  # ldr  r1, [r1]
         0xE2412101,  # sub  r2, r1, #0x40000000
-        0xE3520202,  # cmp  r2, #0x20000000
+        0xE352020A,  # cmp  r2, #0xa0000000
     ))
     b("sample_fail", cond=0x2)  # bhs
 
@@ -188,7 +189,7 @@ def build_live_ai_cave3() -> tuple[bytes, dict[str, int]]:
     insns.extend((
         0xE5917004,  # ldr  r7, [r1, #0x04]
         0xE2472101,  # sub  r2, r7, #0x40000000
-        0xE3520202,  # cmp  r2, #0x20000000
+        0xE352020A,  # cmp  r2, #0xa0000000
     ))
     b("sample_fail", cond=0x2)  # bhs
 
@@ -196,11 +197,11 @@ def build_live_ai_cave3() -> tuple[bytes, dict[str, int]]:
     insns.extend((
         0xE5918008,  # ldr  r8, [r1, #0x08]
         0xE2482101,  # sub  r2, r8, #0x40000000
-        0xE3520202,  # cmp  r2, #0x20000000
+        0xE352020A,  # cmp  r2, #0xa0000000
         0x23A08000,  # movhs r8, #0
         0xE591900C,  # ldr  sb, [r1, #0x0c]
         0xE2492101,  # sub  r2, sb, #0x40000000
-        0xE3520202,  # cmp  r2, #0x20000000
+        0xE352020A,  # cmp  r2, #0xa0000000
         0x23A09000,  # movhs sb, #0
         0xE58D8008,  # str  r8, [sp, #8]
         0xE58D900C,  # str  sb, [sp, #12]
@@ -1102,7 +1103,7 @@ def build_live_ai_cave2() -> bytes:
 
 
 def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> dict:
-    """Apply Step 2D v1.2.16 live-frame AI AF patch non-destructively inside RTOS bounds."""
+    """Apply Step 2D v1.2.17 live-frame AI AF patch non-destructively inside RTOS bounds."""
     if not __debug__:
         raise RuntimeError("Stage 3 preflight uses assertions; do not run with python -O")
     update_off = rtos_start + HOOK_UPDATE_VA - s3.GR4_BASE
@@ -1138,7 +1139,7 @@ def apply_live_ai_patch(payload: bytearray, rtos_start: int, rtos_end: int) -> d
     payload[:] = check
     info = cave_layout()
     manifest.update({
-        "stage": "Step 2D v1.2.16: Live-frame continuous CEVA-XM4 AI subject-tracking AF (Option B)",
+        "stage": "Step 2D v1.2.17: Live-frame continuous CEVA-XM4 AI subject-tracking AF (Option B)",
         "post_update_hook": {
             "va": hex(HOOK_UPDATE_VA),
             "offset": hex(update_off),

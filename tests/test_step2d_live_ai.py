@@ -1,4 +1,4 @@
-"""Executable A32 Unicorn + container tests for Step 2D v1.2.16 live-frame AI AF (Option B)."""
+"""Executable A32 Unicorn + container tests for Step 2D v1.2.17 live-frame AI AF (Option B)."""
 
 import os
 from pathlib import Path
@@ -17,10 +17,10 @@ import step2d_live_ai_patcher as lp
 import build_step2d_live_ai as builder
 
 FACTORY, SERVICE, SLOT_TABLE, CACHE_REQ_TABLE = 0x15000, 0x15100, 0x16000, 0x16200
-# Place AHIP slot pointer, slot struct, and YUV420 planes inside valid GR IV DDR [0x40000000..0x60000000)
-AHIP_SLOT_PP = 0x48000000
-AHIP_SLOT_VA = 0x48000100
-YUV_BASE_VA = 0x48010000
+# Place AHIP slot pointer/struct in RTOS/IMAGE1 DDR and YUV420 planes in authentic Heap[15] IMAGE2 [0xa0000000..0xe0000000)
+AHIP_SLOT_PP = 0x55081578
+AHIP_SLOT_VA = 0x68000100
+YUV_BASE_VA = 0xA0010000
 
 
 def _clamp8(v: int) -> int:
@@ -123,7 +123,7 @@ class LiveAiMachine:
             for x in self.service_sites | {
                 FD, SP - 4, FACTORY, SERVICE, SLOT_TABLE, CACHE_REQ_TABLE, s3.TENSOR_MSG_VA,
                 s3.CAVE1_VA, lp.HOOK_UPDATE_VA, s3.HOOK1_RESUME_VA, s3.HOOK1_SINGLETON_VA,
-                s3.AHIP_DRV_BASE_VA, s3.AHIP_DRV_BASE_VA + 0x424, AHIP_SLOT_PP,
+                s3.AHIP_DRV_BASE_VA, s3.AHIP_DRV_BASE_VA + 0x424, AHIP_SLOT_PP, AHIP_SLOT_VA,
             }
         }
         pages.update(range(s3.CAVE2_VA & ~0xFFF, lp.CAVE3_LIMIT_VA + 0x1000, 0x1000))
@@ -358,7 +358,10 @@ class TestStep2DLiveAi(unittest.TestCase):
         c3, _ = lp.build_live_ai_cave3()
         self.assertEqual(len(list(md.disasm(c1, s3.CAVE1_VA))) * 4, len(c1))
         self.assertEqual(len(list(md.disasm(c2, s3.CAVE2_VA))) * 4, len(c2))
-        self.assertEqual(len(list(md.disasm(c3, lp.CAVE3_VA))) * 4, len(c3))
+        dec3 = list(md.disasm(c3, lp.CAVE3_VA))
+        self.assertEqual(len(dec3) * 4, len(c3))
+        ddr_cmps = [ins for ins in dec3 if ins.mnemonic == "cmp" and ins.op_str == "r2, #0xa0000000"]
+        self.assertEqual(len(ddr_cmps), 5)
 
     def test_cave1_zeroes_full_64_bytes_and_publishes_cookie(self):
         m = LiveAiMachine(boot_seen=True)
@@ -421,12 +424,18 @@ class TestStep2DLiveAi(unittest.TestCase):
         self.assertEqual(len(m.calls("load")), 1)
         self.assertEqual(len(m.calls("start")), 0)
 
-        # 2. Out-of-range slot_pp / slot / Y_ptr: skips cleanly without crashing
+        # 2. Out-of-range slot_pp / slot / Y_ptr (<0x40000000 or >=0xe0000000): skips cleanly without crashing
         for bad_slot_pp, bad_slot, bad_y in (
             (0x0, AHIP_SLOT_VA, YUV_BASE_VA),
-            (0x12345678, AHIP_SLOT_VA, YUV_BASE_VA),
-            (AHIP_SLOT_PP, 0x70000000, YUV_BASE_VA),
+            (0x2985B000, AHIP_SLOT_VA, YUV_BASE_VA),  # MMIO
+            (0x3FFFFFFF, AHIP_SLOT_VA, YUV_BASE_VA),
+            (0xE0000000, AHIP_SLOT_VA, YUV_BASE_VA),
+            (0xFFFFFFFF, AHIP_SLOT_VA, YUV_BASE_VA),
+            (AHIP_SLOT_PP, 0xE0000000, YUV_BASE_VA),
+            (AHIP_SLOT_PP, 0x20000000, YUV_BASE_VA),
             (AHIP_SLOT_PP, AHIP_SLOT_VA, 0x0),
+            (AHIP_SLOT_PP, AHIP_SLOT_VA, 0xE0000000),
+            (AHIP_SLOT_PP, AHIP_SLOT_VA, 0x3FFFFFFF),
         ):
             m = LiveAiMachine()
             m.u.mem_write(s3.AHIP_DRV_BASE_VA + 0x424, words(bad_slot_pp))
@@ -436,6 +445,19 @@ class TestStep2DLiveAi(unittest.TestCase):
                 m.u.mem_write(AHIP_SLOT_VA + 0x04, words(bad_y))
             m.run_frames(24)
             self.assertEqual(len(m.calls("start")), 0)
+
+        # 2b. Verify accepted RTOS/IMAGE1/IMAGE2 combinations all run cleanly
+        #     (55081578, 68000100, a0010000 is already tested by default LiveAiMachine)
+        #     Also check boundary Y_ptr just above IMAGE1 (0x5d8a0000) and U/V=0 vs out-of-range U/V
+        m = LiveAiMachine()
+        m.u.mem_write(AHIP_SLOT_VA + 0x08, words(0xE0000000))  # invalid U -> clamped to gray fallback
+        m.setup_ahip_frame(y_bytes=bytes([99]) * (320 * 212), include_uv=False)
+        m.u.mem_write(AHIP_SLOT_VA + 0x08, words(0xE0000000))
+        m.u.mem_write(AHIP_SLOT_VA + 0x0C, words(0x20000000))
+        m.run_frames(21)
+        self.assertEqual(len(m.calls("send")), 1)
+        tensor = m.u.mem_read(s3.TENSOR_IN_VA, 0x2A00)
+        self.assertEqual((tensor[0], tensor[0x0E00], tensor[0x1C00]), (99, 99, 99))
 
         # 3. NULL U/V pointers fall back cleanly to grayscale R==G==B==Y
         m = LiveAiMachine(include_uv=False)
@@ -447,7 +469,8 @@ class TestStep2DLiveAi(unittest.TestCase):
 
     def test_option_b_empty_scene_hides_box_while_dsp_keeps_running(self):
         m = LiveAiMachine(latencies=(1,))
-        m.heatmap_provider = lambda _: make_heatmap_blob()  # empty wall
+        # Below PEAK_THRESH=3 / AREA_THRESH=2 should keep box hidden
+        m.heatmap_provider = lambda _: make_heatmap_blob(ch1_cells=[(28, 28, 2), (29, 28, 2)])
         m.run_frames(40)
         self.assertGreaterEqual(m.word(0x14), 4)  # multiple live cycles completed
         self.assertEqual(m.word(0x24), 0)         # has_box == 0
@@ -549,7 +572,7 @@ class TestStep2DLiveAi(unittest.TestCase):
         self.assertGreaterEqual(len(m.calls("ef_clear")), 1)
         self.assertEqual(m.osd_snapshots[-1][0], 1)
 
-    def test_packaged_v1216_binary_roundtrip_and_unicorn_end_to_end(self):
+    def test_packaged_v1217_binary_roundtrip_and_unicorn_end_to_end(self):
         stock_path = Path(os.environ.get(
             "GR4_V120_STOCK",
             r"d:\Ricoh GR4 firmware Mod\firmware\official\v1.20\fwdc248b.bin",
